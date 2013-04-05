@@ -37,13 +37,12 @@ Example client use:
 package main
 
 import (
-	"crypto/tls"
 	"github.com/SlyMarbo/wp"
 )
 
 func main() {
 	
-	resp, err := wp.Get("wp://example.com/", &tls.Config{})
+	resp, err := wp.Get("wp://example.com/", nil)
 	if err != nil {
 		// handle error.
 	}
