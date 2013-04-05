@@ -42,6 +42,13 @@ import (
 
 func main() {
 	
+	/* Using wp.Fetch to download a file with WP */
+	err := wp.FetchJust("wp://example.com/", nil, wp.DownloadTo("."))
+	if err != nil {
+		// handle error.
+	}
+	
+	/* Using wp.Get to handle the response manually */
 	resp, err := wp.Get("wp://example.com/", nil)
 	if err != nil {
 		// handle error.
