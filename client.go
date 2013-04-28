@@ -425,9 +425,7 @@ func fet(config *tls.Config, handler ResponseHandler, follow bool, next chan str
 		
 			sid := dataResponse.StreamID()
 			res := responses[sid]
-			if sid > 200 {
-				fmt.Println(dataResponse)
-			}
+			
 			res.StatusCode = dataResponse.ResponseCode()
 			res.StatusSubcode = dataResponse.ResponseSubcode()
 			res.Status = fmt.Sprintf("%d/%d", res.StatusCode, res.StatusSubcode)
@@ -567,6 +565,7 @@ func fet(config *tls.Config, handler ResponseHandler, follow bool, next chan str
 			}
 			res.Body = bytes.NewReader(dataContent.Data())
 			res.Close = (dataContent.Flags() & DataContentFlagFinish) != 0
+			res.Ready = (dataContent.Flags() & DataContentFlagReady) != 0
 			
 			links, err := handler.Handle(res, state.StreamIDs[sid])
 			if err != nil {

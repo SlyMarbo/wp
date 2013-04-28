@@ -453,7 +453,7 @@ func (w *response) finishRequest(streaming bool) {
 		content.SetPacketType(IsDataContent)
 		
 		if streaming {
-			content.SetFlags(DataContentFlagFinish | DataContentFlagStreaming)
+			content.SetFlags(DataContentFlagReady)
 		} else {
 			content.SetFlags(DataContentFlagFinish)
 		}
@@ -665,7 +665,10 @@ func (c *conn) serve() {
 			// Invalid stream ID
 			reply := NewStreamError()
 			
-			if uint16(w.req.StreamID) > c.state.IdOdd + 2 {
+			if w.req.StreamID & 1 != 0 {
+				// Stream ID is even
+				reply.SetStatusCode(InvalidStream)
+			} else if uint16(w.req.StreamID) > c.state.IdOdd + 2 {
 				// Stream ID is too large
 				reply.SetStatusCode(RefusedStream)
 			} else {

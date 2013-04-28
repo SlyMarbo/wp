@@ -42,6 +42,10 @@ type Response struct {
 	// closed after reading Body.  The value is advice for clients: neither
 	// ReadResponse nor Response.Write ever closes a connection.
 	Close bool
+	
+	// Ready indicates that this is a streaming response, and that data is
+	// ready to be processed.
+	Ready bool
 
 	// The Request that was sent to obtain this Response.
 	// Request's Body is nil (having already been consumed).

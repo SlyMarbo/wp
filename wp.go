@@ -51,7 +51,7 @@ const (
 // Data content (7)
 const (
   DataContentFlagFinish    = 1
-	DataContentFlagStreaming = 2
+	DataContentFlagReady     = 2
 )
 
 // Hello constants
@@ -63,14 +63,13 @@ const (
 const (
   ProtocolError       = 0x1
   UnsupportedVersion  = 0x2
-  UnsupportedEncoding = 0x3
-  InvalidStream       = 0x4
-  RefusedStream       = 0x5
-  StreamClosed        = 0x6
-  StreamInUse         = 0x7
-  StreamIDMissing     = 0x8
-  InternalError       = 0x9
-  FinishStream        = 0xa
+  InvalidStream       = 0x3
+  RefusedStream       = 0x4
+  StreamClosed        = 0x5
+  StreamInUse         = 0x6
+  StreamIDMissing     = 0x7
+  InternalError       = 0x8
+  FinishStream        = 0x9
 )
 
 // Stream finish status data
@@ -705,7 +704,7 @@ func (reader DataStream) DataResponse() (DataResponse, error) {
 	return DataResponse(buffer), nil
 }
 
-const DataResponseSize = 18
+const DataResponseSize = 16
 func (packet DataResponse) String() string {
   var buffer bytes.Buffer
 
@@ -718,8 +717,6 @@ func (packet DataResponse) String() string {
 	buffer.WriteString(fmt.Sprintf("Response subcode: %d\n", packet.ResponseSubcode()))
   buffer.WriteString(fmt.Sprintf("Header size:      %d\n", packet.HeaderSize()))
   buffer.WriteString(fmt.Sprintf("Cache:            %d\n", packet.Timestamp()))
-	buffer.WriteString(fmt.Sprintf("MIME type:        %d\n", packet.MimeType()))
-	buffer.WriteString(fmt.Sprintf("MIME subtype:     %d\n", packet.MimeSubtype()))
 
   return buffer.String()
 }
@@ -756,16 +753,8 @@ func (packet DataResponse) Timestamp() uint64 {
 		(uint64(packet[14]) << 8) + uint64(packet[15])
 }
 
-func (packet DataResponse) MimeType() int {
-  return int((packet[16] & 0xe0) >> 5)
-}
-
-func (packet DataResponse) MimeSubtype() int {
-  return (int(packet[16] & 0x1f) << 8) + int(packet[17])
-}
-
 func (packet DataResponse) Header() string {
-	start := uint32(18)
+	start := uint32(16)
 	size := packet.HeaderSize()
 	return string(packet[start : start + size])
 }
@@ -809,21 +798,12 @@ func (packet DataResponse) SetTimestamp(val uint64) {
   packet[15] = byte(val)
 }
 
-func (packet DataResponse) SetMimeType(val byte) {
-  packet[16] = (packet[16] & 0x1f) | ((val & 0x7) << 5)
-}
-
-func (packet DataResponse) SetMimeSubtype(val uint16) {
-  packet[16] = (packet[16] & 0xe0) | (byte(val >> 8) & 0x1f)
-  packet[17] = byte(val)
-}
-
 func (packet DataResponse) SetHeader(val string) {
 	if len(val) == 0 {
 		return
 	}
 	packet.SetHeaderSize(uint32(len(val)))
-	start := 18
+	start := 16
 	copy(packet[start:], []byte(val))
 }
 
