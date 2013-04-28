@@ -216,8 +216,9 @@ func (w *response) Write(data []byte) (n int, err error) {
 	if w.responseSent {
 		responseSize = 0
 	}
-	contentSize  := DataContentSize + len(data)
-	if len(data) == 0 {
+	size := len(data)
+	contentSize  := DataContentSize
+	if size == 0 {
 		contentSize = 0
 	}
 	
@@ -235,11 +236,11 @@ func (w *response) Write(data []byte) (n int, err error) {
 		w.responseSent = true
 	}
 	
-	if len(data) > 0 {
+	if size > 0 {
 		content := DataContent(buffer[responseSize:])
 		content.SetPacketType(IsDataContent)
 		content.SetStreamID(w.streamID)
-		content.SetData(data)
+		content.SetSize(uint32(size))
 	}
 	w.lock.Unlock()
 	
@@ -253,8 +254,11 @@ func (w *response) Write(data []byte) (n int, err error) {
 	}
 	
 	w.conn.rwc.Write(buffer)
+	if size > 0 {
+		w.conn.rwc.Write(data)
+	}
 
-	return len(data), nil
+	return size, nil
 }
 
 // Send is used to send data immediately. This is normally used for controlled
