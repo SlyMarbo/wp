@@ -151,3 +151,7 @@ func (p *pushStream) Version() uint8 {
 func (p *pushStream) Run() {
 	panic("Error: Push cannot run.")
 }
+
+func (s *pushStream) Wait() {
+	panic("Error: Push cannot run.")
+}

@@ -464,6 +464,11 @@ func SetDebugOutput(w io.Writer) {
 	debug = logging.New(w, "(wp debug) ", logging.LstdFlags)
 }
 
+// EnableDebugOutput sets the output for the package's debug info logger to os.Stdout.
+func EnableDebugOutput() {
+	SetDebugOutput(os.Stdout)
+}
+
 // Errors introduced by the HTTP server.
 var (
 	ErrWriteAfterFlush = errors.New("Conn.Write called after Flush")
@@ -501,6 +506,84 @@ func (h *_httpPushWriter) Header() http.Header {
 
 func (h *_httpPushWriter) WriteHeader(int) {
 	h.WriteHeaders()
+}
+
+var statusTexts = [][]string{
+	[]string{
+		"Success",
+		"Cached",
+		"Partial",
+	},
+	[]string{
+		"Moved Temporarily",
+		"Moved Permanently",
+	},
+	[]string{
+		"Bad Request",
+		"Forbidden",
+		"Not Found",
+		"Removed",
+	},
+	[]string{
+		"Server Error",
+		"Service Unavailable",
+		"Service Timeout",
+	},
+}
+
+func StatusText(code, subcode int) string {
+	if code < len(statusTexts) {
+		if subcode < len(statusTexts[code]) {
+			return statusTexts[code][subcode]
+		}
+	}
+	return ""
+}
+
+func wpToHttpResponseCode(code, subcode int) int {
+	switch code {
+	case StatusSuccess:
+		switch subcode {
+		case StatusSuccess:
+			return http.StatusOK
+		case StatusCached:
+			return http.StatusNotModified
+		case StatusPartial:
+			return http.StatusPartialContent
+		}
+
+	case StatusRedirection:
+		switch subcode {
+		case StatusMovedTemporarily:
+			return http.StatusSeeOther
+		case StatusMovedPermanently:
+			return http.StatusMovedPermanently
+		}
+
+	case StatusClientError:
+		switch subcode {
+		case StatusBadRequest:
+			return http.StatusBadRequest
+		case StatusForbidden:
+			return http.StatusForbidden
+		case StatusNotFound:
+			return http.StatusNotFound
+		case StatusRemoved:
+			return http.StatusGone
+		}
+
+	case StatusServerError:
+		switch subcode {
+		case StatusServerError:
+			return http.StatusInternalServerError
+		case StatusServiceUnavailable:
+			return http.StatusServiceUnavailable
+		case StatusServiceTimeout:
+			return http.StatusGatewayTimeout
+		}
+	}
+
+	return http.StatusInternalServerError
 }
 
 func httpToWpResponseCode(code int) (int, int) {

@@ -64,7 +64,7 @@ func (conn *clientConnection) readFrames() {
 		if err != nil {
 			if err == io.EOF {
 				// Server has closed the TCP connection.
-				log.Println("Note: Server has disconnected.")
+				debug.Println("Note: Server has disconnected.")
 				return
 			}
 
@@ -157,7 +157,7 @@ func (conn *clientConnection) send() {
 		if err != nil {
 			if err == io.EOF {
 				// Server has closed the TCP connection.
-				log.Println("Note: Server has disconnected.")
+				debug.Println("Note: Server has disconnected.")
 				return
 			}
 
@@ -245,7 +245,7 @@ func (conn *clientConnection) Request(req *Request, res Receiver) (Stream, error
 			syn.flags = FLAG_FIN
 		} else {
 			syn.Headers.Set("Content-Length", fmt.Sprint(total))
-			body[len(body)-1].flags = FLAG_FIN
+			body[len(body)-1].flags = FLAG_READY
 		}
 		req.Body.Close()
 	} else {
@@ -277,6 +277,7 @@ func (conn *clientConnection) Request(req *Request, res Receiver) (Stream, error
 	out.headers = make(Headers)
 	out.stop = false
 	out.version = conn.version
+	out.done = make(chan struct{}, 1)
 
 	// Store in the connection map.
 	conn.streams[syn.streamID] = out

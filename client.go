@@ -119,6 +119,124 @@ func (c *Client) doHTTP(conn net.Conn, req *Request) (*Response, error) {
 	return httpToWpResponse(httpRes, req), nil
 }
 
+// doTalk is used to connect to a server for a two-way discussion.
+func (c *Client) doTalk(req *Request, rec Receiver) (Stream, error) {
+	u := req.URL
+
+	// Make sure the URL host contains the port.
+	if !strings.Contains(u.Host, ":") {
+		switch u.Scheme {
+		case "http":
+			u.Host += ":80"
+
+		case "https":
+			u.Host += ":443"
+		}
+	}
+
+	c.Lock()
+	defer c.Unlock()
+
+	// Initialise structures if necessary.
+	if c.wpConns == nil {
+		c.wpConns = make(map[string]Connection)
+	}
+	if c.connLimit == nil {
+		c.connLimit = make(map[string]chan struct{})
+	}
+	if c.MaxTcpConnsPerHost == 0 {
+		c.MaxTcpConnsPerHost = 6
+	}
+	if _, ok := c.connLimit[u.Host]; !ok {
+		limitChan := make(chan struct{}, c.MaxTcpConnsPerHost)
+		c.connLimit[u.Host] = limitChan
+		for i := 0; i < c.MaxTcpConnsPerHost; i++ {
+			limitChan <- struct{}{}
+		}
+	}
+
+	// Check the WP connection pool.
+	conn, ok := c.wpConns[u.Host]
+	if !ok || u.Scheme == "http" {
+		tcpConn, err := c.dial(req.URL)
+		if err != nil {
+			return nil, err
+		}
+
+		// Handle HTTPS/WP requests.
+		if tlsConn, ok := tcpConn.(*tls.Conn); ok {
+			state := tlsConn.ConnectionState()
+
+			// Complete handshake if necessary.
+			if !state.HandshakeComplete {
+				err = tlsConn.Handshake()
+				if err != nil {
+					return nil, err
+				}
+			}
+
+			// Verify hostname, unless requested not to.
+			if !c.TLSConfig.InsecureSkipVerify {
+				err = tlsConn.VerifyHostname(req.URL.Host)
+				if err != nil {
+					return nil, err
+				}
+			}
+
+			// If a protocol could not be negotiated, assume HTTPS.
+			if !state.NegotiatedProtocolIsMutual {
+				return nil, errors.New("Error: Server does not support WP.")
+			}
+
+			// Scan the list of supported NPN strings.
+			supported := false
+			for _, proto := range NpnStrings() {
+				if state.NegotiatedProtocol == proto {
+					supported = true
+					break
+				}
+			}
+
+			if !supported {
+				msg := fmt.Sprintf("Error: Unsupported negotiated protocol %q.", state.NegotiatedProtocol)
+				return nil, errors.New(msg)
+			}
+
+			switch state.NegotiatedProtocol {
+			case "http/1.1", "":
+				return nil, errors.New("Error: Server does not support WP.")
+
+			case "wp/2":
+				newConn := newClientConn(tlsConn)
+				newConn.client = c
+				newConn.version = 2
+				newConn.pushReceiver = c.PushReceiver
+				go newConn.run()
+				c.wpConns[u.Host] = newConn
+				conn = newConn
+			}
+		} else {
+			// Handle HTTP servers.
+			return nil, errors.New("Error: Server does not support WP.")
+		}
+	}
+
+	// The WP connection has now been established.
+
+	debug.Printf("Starting TALK connection to %q on WP.\n", u.String())
+
+	// Send the request.
+	stream, err := conn.Request(req, rec)
+	if err != nil {
+		return nil, err
+	}
+
+	// Start the stream.
+	go stream.Run()
+
+	return stream, nil
+}
+
 // do handles the actual request; ensuring a connection is
 // made, determining which protocol to use, and performing
 // the request.
@@ -237,7 +355,6 @@ func (c *Client) do(req *Request) (*Response, error) {
 				go newConn.run()
 				c.wpConns[u.Host] = newConn
 				conn = newConn
-				c.Unlock()
 			}
 		} else {
 			// Handle HTTP requests.
@@ -245,6 +362,7 @@ func (c *Client) do(req *Request) (*Response, error) {
 			return c.doHTTP(tcpConn, req)
 		}
 	}
+	c.Unlock()
 
 	// The WP connection has now been established.
 
@@ -411,8 +529,27 @@ func defaultCheckRedirect(req *Request, via []*Request) error {
 	return nil
 }
 
-// Get issues a GET to the specified URL.  If the response is one of the following
-// redirect codes, Get follows the redirect, up to a maximum of 10 redirects:
+// Talk is used to create a two-way connection to the specified
+// URL. This is only compatible with WP servers.
+//
+// Talk is a wrapper around DefaultClient.Talk.
+func Talk(url string, rec Receiver) (Stream, error) {
+	return DefaultClient.Talk(url, rec)
+}
+
+// Talk is used to create a two-way connection to the specified
+// URL. This is only compatible with WP servers.
+func (c *Client) Talk(url string, rec Receiver) (Stream, error) {
+	req, err := NewRequest("TALK", url, nil, DefaultPriority(url))
+	if err != nil {
+		return nil, err
+	}
+	return c.doTalk(req, rec)
+}
+
+// Get issues a GET to the specified URL. If the response is one of
+// the following redirect codes, Get follows the redirect, up to a
+// maximum of 10 redirects:
 //
 //    301 (Moved Permanently)
 //    302 (Found)

@@ -28,6 +28,7 @@ type serverStream struct {
 	stop            bool
 	wroteHeader     bool
 	version         uint8
+	done            chan struct{}
 }
 
 func (s *serverStream) Cancel() {
@@ -271,4 +272,11 @@ func (s *serverStream) Run() {
 	// Clean up state.
 	s.state.CloseHere()
 	s.conn.done.Done()
+	s.done <- struct{}{}
+}
+
+// Wait will block until the stream
+// ends.
+func (s *serverStream) Wait() {
+	<-s.done
 }

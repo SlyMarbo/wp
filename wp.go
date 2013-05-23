@@ -27,6 +27,7 @@ type Stream interface {
 	WriteHeaders()
 	WriteResponse(int, int)
 	Version() uint8
+	Wait()
 }
 
 type Frame interface {
@@ -59,15 +60,16 @@ type Receiver interface {
 	ReceiveData(request *Request, data []byte, final bool)
 	ReceiveHeaders(request *Request, headers Headers)
 	ReceiveRequest(request *Request) bool
+	ReceiveResponse(request *Request, statusCode int, statusSubcode int)
 }
 
 func ReadFrame(reader *bufio.Reader) (frame Frame, err error) {
-	start, err := reader.Peek(1)
+	start, err := reader.Peek(3)
 	if err != nil {
 		return nil, err
 	}
 
-	switch (start[0] & 0xe0) >> 5 {
+	switch start[2] {
 	case HEADERS:
 		frame = new(HeadersFrame)
 	case ERROR:
@@ -111,7 +113,7 @@ func (frame *HeadersFrame) Bytes() ([]byte, error) {
 
 	out[0] = byte(length >> 8)          // Length
 	out[1] = byte(length)               // Length
-	out[2] = 0                          // Type
+	out[2] = HEADERS                    // Type
 	out[3] = frame.flags                // Flags
 	out[4] = byte(frame.streamID >> 24) // Stream ID
 	out[5] = byte(frame.streamID >> 16) // Stream ID
@@ -223,7 +225,7 @@ func (frame *HeadersFrame) WriteTo(writer io.Writer) error {
 
 	out[0] = byte(length >> 8)          // Length
 	out[1] = byte(length)               // Length
-	out[2] = 0                          // Type
+	out[2] = HEADERS                    // Type
 	out[3] = frame.flags                // Flags
 	out[4] = byte(frame.streamID >> 24) // Stream ID
 	out[5] = byte(frame.streamID >> 16) // Stream ID
@@ -251,7 +253,7 @@ func (frame *ErrorFrame) Bytes() ([]byte, error) {
 	out[0] = 0                          // Length
 	out[1] = 7                          // Length
 	out[2] = 1                          // Type
-	out[3] = 0                          // Flags
+	out[3] = ERROR                      // Flags
 	out[4] = byte(frame.streamID >> 24) // Stream ID
 	out[5] = byte(frame.streamID >> 16) // Stream ID
 	out[6] = byte(frame.streamID >> 8)  // Stream ID
@@ -348,7 +350,7 @@ func (frame *RequestFrame) Bytes() ([]byte, error) {
 	priority := (frame.Priority & 0x7) << 5
 	out[0] = byte(length >> 8)          // Length
 	out[1] = byte(length)               // Length
-	out[2] = 2                          // Type
+	out[2] = REQUEST                    // Type
 	out[3] = flags | priority           // Flags and Priority
 	out[4] = byte(frame.streamID >> 24) // Stream ID
 	out[5] = byte(frame.streamID >> 16) // Stream ID
@@ -460,7 +462,7 @@ func (frame *RequestFrame) WriteTo(writer io.Writer) error {
 	priority := (frame.Priority & 0x7) << 5
 	out[0] = byte(length >> 8)          // Length
 	out[1] = byte(length)               // Length
-	out[2] = 2                          // Type
+	out[2] = REQUEST                    // Type
 	out[3] = flags | priority           // Flags and Priority
 	out[4] = byte(frame.streamID >> 24) // Stream ID
 	out[5] = byte(frame.streamID >> 16) // Stream ID
@@ -504,7 +506,7 @@ func (frame *ResponseFrame) Bytes() ([]byte, error) {
 	subcode := frame.ResponseSubcode & 0x3f
 	out[0] = byte(length >> 8)          // Length
 	out[1] = byte(length)               // Length
-	out[2] = 3                          // Type
+	out[2] = RESPONSE                   // Type
 	out[3] = flags | priority           // Flags and Priority
 	out[4] = byte(frame.streamID >> 24) // Stream ID
 	out[5] = byte(frame.streamID >> 16) // Stream ID
@@ -622,7 +624,7 @@ func (frame *ResponseFrame) WriteTo(writer io.Writer) error {
 	subcode := frame.ResponseSubcode & 0x3f
 	out[0] = byte(length >> 8)          // Length
 	out[1] = byte(length)               // Length
-	out[2] = 3                          // Type
+	out[2] = RESPONSE                   // Type
 	out[3] = flags | priority           // Flags and Priority
 	out[4] = byte(frame.streamID >> 24) // Stream ID
 	out[5] = byte(frame.streamID >> 16) // Stream ID
@@ -661,7 +663,7 @@ func (frame *PushFrame) Bytes() ([]byte, error) {
 
 	out[0] = byte(length >> 8)                    // Length
 	out[1] = byte(length)                         // Length
-	out[2] = 4                                    // Type
+	out[2] = PUSH                                 // Type
 	out[3] = frame.flags                          // Flags
 	out[4] = byte(frame.streamID >> 24)           // Stream ID
 	out[5] = byte(frame.streamID >> 16)           // Stream ID
@@ -775,7 +777,7 @@ func (frame *PushFrame) WriteTo(writer io.Writer) error {
 
 	out[0] = byte(length >> 8)                    // Length
 	out[1] = byte(length)                         // Length
-	out[2] = 4                                    // Type
+	out[2] = PUSH                                 // Type
 	out[3] = frame.flags                          // Flags
 	out[4] = byte(frame.streamID >> 24)           // Stream ID
 	out[5] = byte(frame.streamID >> 16)           // Stream ID
@@ -809,7 +811,7 @@ func (frame *DataFrame) Bytes() ([]byte, error) {
 
 	out[0] = byte(length >> 8)          // Length
 	out[1] = byte(length)               // Length
-	out[2] = 5                          // Type
+	out[2] = DATA                       // Type
 	out[3] = frame.flags                // Flags
 	out[4] = byte(frame.streamID >> 24) // Stream ID
 	out[5] = byte(frame.streamID >> 16) // Stream ID
@@ -898,7 +900,7 @@ func (frame *DataFrame) WriteTo(writer io.Writer) error {
 
 	out[0] = byte(length >> 8)          // Length
 	out[1] = byte(length)               // Length
-	out[2] = 5                          // Type
+	out[2] = DATA                       // Type
 	out[3] = frame.flags                // Flags
 	out[4] = byte(frame.streamID >> 24) // Stream ID
 	out[5] = byte(frame.streamID >> 16) // Stream ID
@@ -926,7 +928,7 @@ func (frame *PingFrame) Bytes() ([]byte, error) {
 
 	out[0] = 0                        // Length
 	out[1] = 6                        // Length
-	out[2] = 6                        // Type
+	out[2] = PING                     // Type
 	out[3] = frame.flags              // Flags
 	out[4] = byte(frame.PingID >> 24) // Ping ID
 	out[5] = byte(frame.PingID >> 16) // Ping ID
@@ -998,7 +1000,7 @@ func (frame *PingFrame) WriteTo(writer io.Writer) error {
 
 	out[0] = 0                        // Length
 	out[1] = 6                        // Length
-	out[2] = 6                        // Type
+	out[2] = PING                     // Type
 	out[3] = frame.flags              // Flags
 	out[4] = byte(frame.PingID >> 24) // Ping ID
 	out[5] = byte(frame.PingID >> 16) // Ping ID

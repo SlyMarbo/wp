@@ -8,17 +8,19 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"strconv"
 )
 
 // Response represents the response from a SPDY/HTTP request.
 type Response struct {
-	Status     string // e.g. "200 OK"
-	StatusCode int    // e.g. 200
-	Proto      string // e.g. "HTTP/1.0"
-	ProtoMajor int    // e.g. 1
-	ProtoMinor int    // e.g. 0
-	WpProto    int    // WP version. Where WP was not used, this will be -1.
+	Status          string // e.g. "200 OK"
+	StatusCode      int    // e.g. 200
+	WpStatus        string // e.g. "0/1 Cached"
+	WpStatusCode    int    // e.g. 0
+	WpStatusSubcode int    // e.g. 1
+	Proto           string // e.g. "HTTP/1.0"
+	ProtoMajor      int    // e.g. 1
+	ProtoMinor      int    // e.g. 0
+	WpProto         int    // WP version. Where WP was not used, this will be -1.
 
 	// SentOverWp indicates whether the request was served over WP.
 	SentOverWp bool
@@ -100,11 +102,11 @@ func (r *Response) ProtoAtLeast(major, minor int) bool {
 }
 
 type response struct {
-	StatusCode int
-	WpProto    int
-	Headers    Headers
-	Data       *bytes.Buffer
-	Request    *Request
+	StatusCode    int
+	StatusSubcode int
+	Headers       Headers
+	Data          *bytes.Buffer
+	Request       *Request
 }
 
 func (r *response) ReceiveData(req *Request, data []byte, finished bool) {
@@ -118,31 +120,32 @@ func (r *response) ReceiveHeaders(req *Request, headers Headers) {
 		r.Headers = make(Headers)
 	}
 	r.Headers.Update(headers)
-	if status := r.Headers.Get(":status"); status != "" && statusRegex.MatchString(status) {
-		if matches := statusRegex.FindAllStringSubmatch(status, -1); matches != nil {
-			s, err := strconv.Atoi(matches[0][1])
-			if err == nil {
-				r.StatusCode = s
-			}
-		}
-	}
 }
 
 func (r *response) ReceiveRequest(req *Request) bool {
 	return false
 }
 
+func (r *response) ReceiveResponse(req *Request, code, subcode int) {
+	r.StatusCode = code
+	r.StatusSubcode = subcode
+}
+
 func (r *response) Response() *Response {
 	if r.Data == nil {
 		r.Data = new(bytes.Buffer)
 	}
+	code := wpToHttpResponseCode(r.StatusCode, r.StatusSubcode)
 	out := new(Response)
-	out.Status = fmt.Sprintf("%d %s", r.StatusCode, http.StatusText(r.StatusCode))
-	out.StatusCode = r.StatusCode
+	out.Status = fmt.Sprintf("%d %s", code, http.StatusText(code))
+	out.StatusCode = code
+	out.WpStatus = fmt.Sprintf("%d/%d %s", r.StatusCode, r.StatusSubcode, StatusText(r.StatusCode, r.StatusSubcode))
+	out.WpStatusCode = r.StatusCode
+	out.WpStatusSubcode = r.StatusSubcode
 	out.Proto = "HTTP/1.1"
 	out.ProtoMajor = 1
 	out.ProtoMinor = 1
-	out.WpProto = r.WpProto
+	out.WpProto = 2
 	out.SentOverWp = true
 	out.Headers = r.Headers
 	out.Body = &readCloserBuffer{r.Data}
@@ -156,16 +159,20 @@ func (r *response) Response() *Response {
 
 type nilReceiver struct{}
 
-func (_ nilReceiver) ReceiveData(_ *Request, _ []byte, _ bool) {
+func (_ nilReceiver) ReceiveData(*Request, []byte, bool) {
 	return
 }
 
-func (_ nilReceiver) ReceiveHeaders(req *Request, headers Headers) {
+func (_ nilReceiver) ReceiveHeaders(*Request, Headers) {
 	return
 }
 
-func (_ nilReceiver) ReceiveRequest(req *Request) bool {
+func (_ nilReceiver) ReceiveRequest(*Request) bool {
 	return false
+}
+
+func (_ nilReceiver) ReceiveResponse(*Request, int, int) {
+	return
 }
 
 func wpToHttpResponse(res *Response, req *Request) *http.Response {

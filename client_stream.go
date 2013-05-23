@@ -23,6 +23,7 @@ type clientStream struct {
 	responseSubcode int
 	stop            bool
 	version         uint8
+	done            chan struct{}
 }
 
 func (s *clientStream) Connection() Connection {
@@ -196,7 +197,7 @@ func (s *clientStream) processInput() {
 	}
 }
 
-// run is the main control path of
+// Run is the main control path of
 // the stream. Data is recieved,
 // processed, and then the stream
 // is cleaned up and closed.
@@ -211,4 +212,11 @@ func (s *clientStream) Run() {
 	// Clean up state.
 	s.state.CloseHere()
 	s.conn.done.Done()
+	s.done <- struct{}{}
+}
+
+// Wait will block until the stream
+// ends.
+func (s *clientStream) Wait() {
+	<-s.done
 }

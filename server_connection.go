@@ -62,7 +62,7 @@ func (conn *serverConnection) readFrames() {
 		if err != nil {
 			if err == io.EOF {
 				// Client has closed the TCP connection.
-				log.Println("Note: Client has disconnected.")
+				debug.Println("Note: Client has disconnected.")
 				return
 			}
 
@@ -155,8 +155,8 @@ func (conn *serverConnection) send() {
 		conn.refreshTimeouts()
 		if err != nil {
 			if err == io.EOF {
-				// Server has closed the TCP connection.
-				log.Println("Note: Server has disconnected.")
+				// Client has closed the TCP connection.
+				debug.Println("Note: Client has disconnected.")
 				return
 			}
 
@@ -210,6 +210,7 @@ func (conn *serverConnection) newStream(frame *RequestFrame, input <-chan Frame,
 	stream.output = output
 	stream.headers = make(Headers)
 	stream.version = conn.version
+	stream.done = make(chan struct{}, 1)
 
 	if frame.flags&FLAG_FIN != 0 {
 		stream.state.CloseThere()
