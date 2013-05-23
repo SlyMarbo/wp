@@ -226,8 +226,9 @@ func (conn *serverConnection) newStream(frame *RequestFrame, input <-chan Frame,
 	// Build this into a request to present to the Handler.
 	stream.request = &Request{
 		URL:        url,
-		Proto:      fmt.Sprintf("WP/%d", conn.version),
-		Protocol:   int(conn.version),
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
 		Priority:   int(frame.Priority),
 		RemoteAddr: conn.remoteAddr,
 		Headers:    headers,
@@ -237,11 +238,6 @@ func (conn *serverConnection) newStream(frame *RequestFrame, input <-chan Frame,
 	}
 
 	return stream
-}
-
-// Internally-sent frames have high priority.
-func (conn *serverConnection) WriteFrame(frame Frame) {
-	conn.dataPriority[0] <- frame
 }
 
 // Ping is used to send a WP ping to the client.
@@ -326,6 +322,11 @@ func (conn *serverConnection) Push(resource string, origin Stream) (PushWriter, 
 // interface. It must not be used by servers.
 func (conn *serverConnection) Request(req *Request, res Receiver) (Stream, error) {
 	return nil, errors.New("Error: Servers cannot make requests.")
+}
+
+// Internally-sent frames have high priority.
+func (conn *serverConnection) WriteFrame(frame Frame) {
+	conn.dataPriority[0] <- frame
 }
 
 func (conn *serverConnection) Version() uint8 {
@@ -453,7 +454,7 @@ func (conn *serverConnection) handleError(frame *ErrorFrame) {
 		return
 
 	default:
-		log.Printf("Error: Received unknown RST_STREAM status code %d.\n", frame.Status)
+		log.Printf("Error: Received unknown Error status code %d.\n", frame.Status)
 		conn.PROTOCOL_ERROR(sid)
 	}
 }

@@ -15,13 +15,17 @@ import (
 )
 
 type Request struct {
+	Method string // GET, POST, PUT, etc.
+
 	// URL is created from the URI supplied on the Request-Line
 	// as stored in RequestURI.
 	URL *url.URL
 
 	// The protocol version for incoming requests.
-	Proto    string // "WP/2"
-	Protocol int    // 2
+	// Outgoing requests always use HTTP/1.1.
+	Proto      string // "HTTP/1.0"
+	ProtoMajor int    // 1
+	ProtoMinor int    // 0
 
 	// The priority of the request, as set by the sender.
 	Priority int
@@ -35,7 +39,7 @@ type Request struct {
 	//
 	// then
 	//
-	//      Headers = map[string][]string{
+	//      Header = map[string][]string{
 	//              "Accept-Encoding": {"gzip, deflate"},
 	//              "Accept-Language": {"en-us"},
 	//              "Connection": {"keep-alive"},
@@ -80,6 +84,14 @@ type Request struct {
 	// The HTTP client ignores MultipartForm and uses Body instead.
 	MultipartForm *multipart.Form
 
+	// Trailer maps trailer keys to values.  Like for Header, if the
+	// response has multiple trailer lines with the same key, they will be
+	// concatenated, delimited by commas.
+	// For server requests, Trailer is only populated after Body has been
+	// closed or fully consumed.
+	// Trailer support is only partially complete.
+	Trailer Headers
+
 	// RemoteAddr allows HTTP servers and other software to record
 	// the network address that sent the request, usually for
 	// logging. This field is not filled in by ReadRequest and
@@ -114,13 +126,14 @@ func NewRequest(method, urlStr string, body io.Reader, priority int) (*Request, 
 		rc = ioutil.NopCloser(body)
 	}
 	req := &Request{
-		URL:      u,
-		Proto:    "WP/2",
-		Protocol: 2,
-		Priority: priority,
-		Headers:  make(Headers),
-		Body:     rc,
-		Host:     u.Host,
+		URL:        u,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Priority:   priority,
+		Headers:    make(Headers),
+		Body:       rc,
+		Host:       u.Host,
 	}
 	if body != nil {
 		switch v := body.(type) {

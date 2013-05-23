@@ -40,6 +40,21 @@ type Frame interface {
 	WriteTo(io.Writer) error
 }
 
+// Objects implementing the Receiver interface can be
+// registered to a specific request on the Client.
+//
+// ReceiveData is passed the original request, the data
+// to receive and a bool indicating whether this is the
+// final batch of data. If the bool is set to true, the
+// data may be empty, but should not be nil.
+//
+// ReceiveHeaders is passed the request and any sent
+// text headers. This may be called multiple times.
+//
+// ReceiveRequest is used when server pushes are sent.
+// The returned bool should inticate whether to accept
+// the push. The provided Request will be that sent by
+// the server with the push.
 type Receiver interface {
 	ReceiveData(request *Request, data []byte, final bool)
 	ReceiveHeaders(request *Request, headers Headers)

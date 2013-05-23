@@ -8,8 +8,10 @@ import (
 	"io/ioutil"
 	logging "log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -281,6 +283,39 @@ func Write(w io.Writer, data []byte) error {
 		}
 	}
 	return nil
+}
+
+// DefaultPriority returns the default request
+// priority for the given target path. This is
+// currently in accordance with Google Chrome;
+// giving 0 for pages, 1 for CSS, 2 for JS, 3
+// for images. Other types default to 2.
+func DefaultPriority(path string) int {
+	u, err := url.Parse(path)
+	if err != nil {
+		log.Printf("Failed to parse request path %q. Using priority 4.\n", path)
+		return 4
+	}
+	path = strings.ToLower(u.Path)
+	switch {
+	case strings.HasSuffix(path, "/"), strings.HasSuffix(path, ".html"), strings.HasSuffix(path, ".xhtml"):
+		return 0
+
+	case strings.HasSuffix(path, ".css"):
+		return 1
+
+	case strings.HasSuffix(path, ".js"), strings.HasSuffix(path, ".javascript"):
+		return 2
+
+	case strings.HasSuffix(path, ".ico"), strings.HasSuffix(path, ".png"), strings.HasSuffix(path, ".jpg"),
+		strings.HasSuffix(path, ".jpeg"), strings.HasSuffix(path, ".gif"), strings.HasSuffix(path, ".webp"),
+		strings.HasSuffix(path, ".svg"), strings.HasSuffix(path, ".bmp"), strings.HasSuffix(path, ".tiff"),
+		strings.HasSuffix(path, ".apng"):
+		return 3
+
+	default:
+		return 2
+	}
 }
 
 func bytesToUint16(b []byte) uint16 {
