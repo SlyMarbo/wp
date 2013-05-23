@@ -126,9 +126,9 @@ func (r *response) ReceiveRequest(req *Request) bool {
 	return false
 }
 
-func (r *response) ReceiveResponse(req *Request, code, subcode int) {
-	r.StatusCode = code
-	r.StatusSubcode = subcode
+func (r *response) ReceiveResponse(req *Request, code, subcode uint8) {
+	r.StatusCode = int(code)
+	r.StatusSubcode = int(subcode)
 }
 
 func (r *response) Response() *Response {
@@ -155,24 +155,6 @@ func (r *response) Response() *Response {
 	out.Trailer = make(Headers)
 	out.Request = r.Request
 	return out
-}
-
-type nilReceiver struct{}
-
-func (_ nilReceiver) ReceiveData(*Request, []byte, bool) {
-	return
-}
-
-func (_ nilReceiver) ReceiveHeaders(*Request, Headers) {
-	return
-}
-
-func (_ nilReceiver) ReceiveRequest(*Request) bool {
-	return false
-}
-
-func (_ nilReceiver) ReceiveResponse(*Request, int, int) {
-	return
 }
 
 func wpToHttpResponse(res *Response, req *Request) *http.Response {

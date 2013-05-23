@@ -20,6 +20,7 @@ type Stream interface {
 	Connection() Connection
 	Headers() Headers
 	Run()
+	Read([]byte) (int, error)
 	ReceiveFrame(Frame)
 	State() *StreamState
 	Stop()
@@ -61,7 +62,7 @@ type Receiver interface {
 	ReceiveData(request *Request, data []byte, final bool)
 	ReceiveHeaders(request *Request, headers Headers)
 	ReceiveRequest(request *Request) bool
-	ReceiveResponse(request *Request, statusCode int, statusSubcode int)
+	ReceiveResponse(request *Request, statusCode uint8, statusSubcode uint8)
 }
 
 func ReadFrame(reader *bufio.Reader) (frame Frame, err error) {

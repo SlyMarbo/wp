@@ -547,26 +547,7 @@ func (srv *Server) ListenAndServeTLS(certFile, keyFile string) error {
 //
 // One can use generate_cert.go in crypto/tls to generate cert.pem and key.pem.
 func ListenAndServeTLS(addr string, certFile string, keyFile string, handler Handler) error {
-	npnStrings := NpnStrings()
-	srv := &Server{Handler: handler}
-	server := &http.Server{
-		Addr: addr,
-		TLSConfig: &tls.Config{
-			NextProtos: npnStrings,
-		},
-		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
-	}
-
-	for _, str := range npnStrings {
-		switch str {
-		case "wp/2":
-			server.TLSNextProto[str] = func(s *http.Server, tlsConn *tls.Conn, handler http.Handler) {
-				srv.httpHandler = handler
-				acceptWPv2(srv, tlsConn, nil)
-			}
-		}
-	}
-
+	server := &Server{Addr: addr, Handler: handler}
 	return server.ListenAndServeTLS(certFile, keyFile)
 }
 

@@ -2,6 +2,7 @@ package wp
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -244,11 +245,8 @@ func (conn *clientConnection) Request(req *Request, res Receiver) (Stream, error
 			syn.flags = FLAG_FIN
 		} else {
 			syn.Headers.Set("Content-Length", fmt.Sprint(total))
-			body[len(body)-1].flags = FLAG_READY
 		}
 		req.Body.Close()
-	} else {
-		syn.flags = FLAG_FIN
 	}
 
 	// Send.
@@ -264,6 +262,7 @@ func (conn *clientConnection) Request(req *Request, res Receiver) (Stream, error
 	// Create the request stream.
 	out := new(clientStream)
 	out.conn = conn
+	out.content = new(bytes.Buffer)
 	out.streamID = syn.streamID
 	out.state = new(StreamState)
 	out.state.CloseHere()
@@ -583,11 +582,6 @@ func (conn *clientConnection) run() {
 			log.Printf("panic serving %v: %v\n%s", conn.remoteAddr, err, buf)
 		}
 	}()
-
-	// Initialise push receiver.
-	if conn.pushReceiver == nil {
-		conn.pushReceiver = new(nilReceiver)
-	}
 
 	// Start the send loop.
 	go conn.send()

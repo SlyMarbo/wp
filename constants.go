@@ -1,7 +1,6 @@
 package wp
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -92,7 +91,7 @@ const MAX_STREAM_ID = 0x7fffffff
 // to allow a bytes buffer to satisfy the
 // io.ReadCloser interface.
 type readCloserBuffer struct {
-	*bytes.Buffer
+	io.Reader
 }
 
 func (r *readCloserBuffer) Close() error {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 )
@@ -48,6 +49,14 @@ func (s *serverStream) Ping() <-chan bool {
 
 func (s *serverStream) Push(resource string) (PushWriter, error) {
 	return s.conn.Push(resource, s)
+}
+
+func (s *serverStream) Read(out []byte) (int, error) {
+	n, err := s.requestBody.Read(out)
+	if err != io.EOF || s.state.ClosedThere() {
+		return n, err
+	}
+	return n, nil
 }
 
 func (s *serverStream) ReceiveFrame(frame Frame) {
@@ -199,8 +208,8 @@ func (s *serverStream) Run() {
 	s.conn.done.Add(1)
 
 	// Make sure Request is prepared.
-	s.requestBody = new(bytes.Buffer) // TODO
-	s.request.Body = &readCloserBuffer{s.requestBody}
+	s.requestBody = new(bytes.Buffer)
+	s.request.Body = &readCloserBuffer{s}
 
 	/***************
 	 *** HANDLER ***

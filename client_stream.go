@@ -1,8 +1,10 @@
 package wp
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 )
 
@@ -12,6 +14,7 @@ import (
 type clientStream struct {
 	sync.RWMutex
 	conn            *clientConnection
+	content         *bytes.Buffer
 	streamID        uint32
 	state           *StreamState
 	output          chan<- Frame
@@ -39,6 +42,14 @@ func (s *clientStream) Ping() <-chan bool {
 
 func (s *clientStream) Push(string) (PushWriter, error) {
 	panic("Error: Request stream cannot push.")
+}
+
+func (s *clientStream) Read(out []byte) (int, error) {
+	n, err := s.content.Read(out)
+	if err != io.EOF || s.state.ClosedThere() {
+		return n, err
+	}
+	return n, nil
 }
 
 func (s *clientStream) ReceiveFrame(frame Frame) {
@@ -155,13 +166,25 @@ func (s *clientStream) receiveFrame(frame Frame) {
 		finish := frame.flags&FLAG_FIN != 0
 
 		// Give to the client.
-		s.receiver.ReceiveData(s.request, data, finish)
+		if s.receiver != nil {
+			s.receiver.ReceiveData(s.request, data, finish)
+		} else {
+			err := Write(s.content, data)
+			if err != nil {
+				panic(err)
+			}
+		}
 
 	case *ResponseFrame:
-		s.receiver.ReceiveHeaders(s.request, frame.Headers)
+		if s.receiver != nil {
+			s.receiver.ReceiveHeaders(s.request, frame.Headers)
+			s.receiver.ReceiveResponse(s.request, frame.ResponseCode, frame.ResponseSubcode)
+		}
 
 	case *HeadersFrame:
-		s.receiver.ReceiveHeaders(s.request, frame.Headers)
+		if s.receiver != nil {
+			s.receiver.ReceiveHeaders(s.request, frame.Headers)
+		}
 
 	default:
 		panic(fmt.Sprintf("Received unknown frame of type %T.", frame))
