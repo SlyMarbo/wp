@@ -6,97 +6,215 @@ A reference implementation of the Web Protocol.
 This library's interface is intended to be very similar to "net/http",
 with only minor differences for features new to WP, such as data pushes.
 
-Example server use:
+Servers
+-------
+
+Adding WP support to an existing Go server doesn't take much work.
+
+Modifying a simple example server like the following:
 ```go
 package main
 
 import (
-	"github.com/SlyMarbo/wp"
+	"net/http"
 )
 
-func Web(writer wp.ResponseWriter, reader *wp.Request) {
-	wp.ServeFile(writer, reader, "." + reader.RequestURI)
+func ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("Hello, HTTP!"))
 }
 
 func main() {
 	
 	// Register handler.
-	wp.HandleFunc("/", Web)
-	
-  // This actually starts the listening.
-  err := wp.ListenAndServe(":99", "cert.pem", "key.pem", nil)
-  if err != nil {
-    // handle error.
-  }
-}
+	http.HandleFunc("/", ServeHTTP)
 
+	err := http.ListenAndServeTLS("localhost:443", "cert.pem", "key.pem", nil)
+	if err != nil {
+		// handle error.
+	}
+}
 ```
 
-Example client use:
+Simply requires the following changes:
+```go
+package main
+
+import (
+	"github.com/SlyMarbo/wp" // Import WP.
+	"net/http"
+)
+
+// This handler will now serve HTTP, HTTPS, and WP requests.
+func ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("Hello, HTTP!"))
+}
+
+func main() {
+	
+	// Register handler.
+	http.HandleFunc("/", ServeHTTP)
+
+	// Use wp's ListenAndServe.
+	err := wp.ListenAndServeTLS("localhost:443", "cert.pem", "key.pem", nil)
+	if err != nil {
+		// handle error.
+	}
+}
+```
+
+WP now supports reuse of HTTP handlers, as demonstrated above. Although this allows you to use just one set of
+handlers, it means there is no way to use the WP-specific capabilities provided by `wp.ResponseWriter`, such as
+server pushes, or to know which protocol is being used.
+
+Making full use of the Web Protocol simple requires adding an extra handler:
 ```go
 package main
 
 import (
 	"github.com/SlyMarbo/wp"
+	"net/http"
 )
+
+// This now only serves HTTP/HTTPS requests.
+func ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("Hello, HTTP!"))
+}
+
+// Add a WP handler.
+func ServeWP(w wp.ResponseWriter, r *wp.Request) {
+	w.Write([]byte("Hello, WP!"))
+}
 
 func main() {
 	
-	/* Using wp.Fetch to download a file with WP */
-	err := wp.FetchJust("wp://example.com/", nil, wp.DownloadTo("."))
-	if err != nil {
-		// handle error.
-	}
-	
-	/* Using wp.Get to handle the response manually */
-	resp, err := wp.Get("wp://example.com/", nil)
-	if err != nil {
-		// handle error.
-	}
-	
-	// use resp.
-}
+	// Register handlers.
+	http.HandleFunc("/", ServeHTTP)
+	wp.HandleFunc("/", ServeWP)
 
+	err := wp.ListenAndServeTLS("localhost:443", "cert.pem", "key.pem", nil)
+	if err != nil {
+		// handle error.
+	}
+}
 ```
 
-The Response structure is similar to net/http.Response:
+A very simple file server for both WP and HTTPS:
 ```go
-type Response struct {
-	Status        string // e.g. "0/0"
-	StatusCode    int    // e.g. 0
-	StatusSubcode int    // e.g. 2
-	Proto         string // e.g. "WP/1"
-	ProtoNum      int    // e.g. 1
+package main
 
-	// Header maps header keys to values.  If the response had multiple
-	// headers with the same key, they will be concatenated, with comma
-	// delimiters.  (Section 4.2 of RFC 2616 requires that multiple headers
-	// be semantically equivalent to a comma-delimited sequence.) Values
-	// duplicated by other fields in this struct (e.g., ContentLength) are
-	// omitted from Header.
-	//
-	// Keys in the map are canonicalized (see CanonicalHeaderKey).
-	Header Header
+import (
+	"github.com/SlyMarbo/wp"
+	"net/http"
+)
 
-	// Body represents the response body.
-	//
-	// The WP Client and Transport guarantee that Body is always
-	// non-nil, even on responses without a body or responses with
-	// a zero-lengthed body.
-	Body io.Reader
+func ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, "." + r.RequestURI)
+}
 
-	// ContentLength records the length of the associated content.  The
-	// value -1 indicates that the length is unknown.  Values >= 0
-	// indicate that the given number of bytes may be read from Body.
-	ContentLength int64
+func ServeWP(w wp.ResponseWriter, r *wp.Request) {
+	wp.ServeFile(w, r, "." + r.RequestURI)
+}
 
-	// Close records whether the header directed that the connection be
-	// closed after reading Body.
-	Close bool
+func main() {
+	
+	// Register handlers.
+	http.HandleFunc("/", ServeHTTP)
+	wp.HandleFunc("/", ServeWP)
 
-	// The Request that was sent to obtain this Response.
-	// Request's Body is nil (having already been consumed).
-	// This is only populated for Client requests.
-	Request *Request
+	err := wp.ListenAndServeTLS("localhost:443", "cert.pem", "key.pem", nil)
+	if err != nil {
+		// handle error.
+	}
+}
+```
+
+The following examples use features specific to WP.
+
+Just the WP handler is shown.
+
+Use WP's pinging features to test the connection:
+```go
+package main
+
+import (
+	"github.com/SlyMarbo/wp"
+	"time"
+)
+
+func ServeWP(w wp.ResponseWriter, r *wp.Request) {
+	// Ping returns a channel which will send a bool.
+	ping := w.Ping()
+	
+	select {
+	case success := <- ping:
+		if success {
+			// Connection is fine.
+		} else {
+			// Something went wrong.
+		}
+		
+	case <-time.After(timeout):
+		// Ping took too long.
+		
+	}
+	
+	// ...
+}
+```
+
+Sending a server push:
+```go
+package main
+
+import "github.com/SlyMarbo/wp"
+
+func ServeWP(w wp.ResponseWriter, r *wp.Request) {
+	
+	// Push a whole file automatically.
+	wp.PushFile(w, r, otherFile)
+	
+	// or
+	
+	// Push returns a PushWriter (similar to a ResponseWriter) and an error.
+	push, err := w.Push()
+	if err != nil {
+		// Handle the error.
+	}
+	push.Write([]byte("Some stuff."))   // Push data manually.
+	
+	// ...
+}
+```
+
+Clients
+-------
+
+The basic client API seems to work well in general, but gets a redirect loop when requesting https://twitter.com/, so
+I'm not happy with it. Since I can't see Twitter's servers' WP logs, I don't know what's wrong yet, but I'm working
+hard at it.
+
+Here's a simple example that will fetch the requested page over HTTP, HTTPS, or WP, as necessary.
+```go
+package main
+
+import (
+	"fmt"
+	"github.com/SlyMarbo/wp"
+	"io/ioutil"
+)
+
+func main() {
+	res, err := wp.Get("https://example.com/")
+	if err != nil {
+		// handle the error.
+	}
+	
+	bytes, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		// handle the error.
+	}
+	res.Body.Close()
+	
+	fmt.Printf("Received: %s\n", bytes)
 }
 ```
