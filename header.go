@@ -1,31 +1,133 @@
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
-// WP Header reading and parsing
-
 package wp
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/textproto"
 	"sort"
 	"strings"
 )
 
-// A Header represents the key-value pairs in an HTTP header.
-type Header map[string][]string
+// A Headers represents the key-value pairs in an HTTP header.
+type Headers map[string][]string
+
+// String pretty-prints the Headers content.
+func (h Headers) String() string {
+	buf := new(bytes.Buffer)
+	buf.WriteString(fmt.Sprintf("Headers {"))
+	for name, values := range h {
+		buf.WriteString(fmt.Sprintf("\n\t\t%-16s", name))
+		l := len(values) - 1
+		for i, value := range values {
+			buf.WriteString(fmt.Sprintf("%s", value))
+			if i < l {
+				for j := 0; j < 16; j++ {
+					buf.WriteString("\n\t\t ")
+				}
+			}
+		}
+	}
+	buf.WriteString(fmt.Sprintf("\n\t}\n"))
+	return buf.String()
+}
+
+// Parse decompresses the data and parses the resulting
+// data into the wp.Headers.
+func (h Headers) Parse(data []byte, dec *Decompressor) error {
+	header, err := dec.Decompress(data)
+	if err != nil {
+		return err
+	}
+
+	for name, values := range header {
+		for _, value := range values {
+			h.Add(name, value)
+		}
+	}
+	return nil
+}
+
+// Bytes returns the headers in
+// SPDY name/value header block
+// format.
+func (h Headers) Bytes() []byte {
+	h.Del("Connection")
+	h.Del("Keep-Alive")
+	h.Del("Proxy-Connection")
+	h.Del("Transfer-Encoding")
+
+	length := 4
+	num := len(h)
+	lens := make(map[string]int)
+	for name, values := range h {
+		length += len(name) + 8
+		lens[name] = len(values) - 1
+		for _, value := range values {
+			length += len(value)
+			lens[name] += len(value)
+		}
+	}
+
+	out := make([]byte, length)
+	out[0] = byte(num >> 24)
+	out[1] = byte(num >> 16)
+	out[2] = byte(num >> 8)
+	out[3] = byte(num)
+
+	offset := 4
+	for name, values := range h {
+		nLen := len(name)
+		out[offset+0] = byte(nLen >> 24)
+		out[offset+1] = byte(nLen >> 16)
+		out[offset+2] = byte(nLen >> 8)
+		out[offset+3] = byte(nLen)
+		offset += 4
+
+		for i, b := range []byte(strings.ToLower(name)) {
+			out[offset+i] = b
+		}
+
+		offset += nLen
+
+		vLen := lens[name]
+		out[offset+0] = byte(vLen >> 24)
+		out[offset+1] = byte(vLen >> 16)
+		out[offset+2] = byte(vLen >> 8)
+		out[offset+3] = byte(vLen)
+		offset += 4
+
+		for n, value := range values {
+			for i, b := range []byte(value) {
+				out[offset+i] = b
+			}
+			offset += len(value)
+			if n < len(values)-1 {
+				out[offset] = '\x00'
+				offset += 1
+			}
+		}
+	}
+
+	return out
+}
+
+// Compressed returns the binary data of the headers
+// once they have been compressed.
+func (h Headers) Compressed(com *Compressor) ([]byte, error) {
+	return com.Compress(h.Bytes())
+}
 
 // Add adds the key, value pair to the header.
 // It appends to any existing values associated with key.
-func (h Header) Add(key, value string) {
+func (h Headers) Add(key, value string) {
 	textproto.MIMEHeader(h).Add(key, value)
 }
 
 // Set sets the header entries associated with key to
 // the single element value.  It replaces any existing
 // values associated with key.
-func (h Header) Set(key, value string) {
+func (h Headers) Set(key, value string) {
 	textproto.MIMEHeader(h).Set(key, value)
 }
 
@@ -33,12 +135,31 @@ func (h Header) Set(key, value string) {
 // If there are no values associated with the key, Get returns "".
 // To access multiple values of a key, access the map directly
 // with CanonicalHeaderKey.
-func (h Header) Get(key string) string {
+func (h Headers) Get(key string) string {
 	return textproto.MIMEHeader(h).Get(key)
 }
 
+// Update uses a second set of headers to update the previous.
+// New headers are added, and old headers are replaced. Headers
+// in the old set but not the new are left unmodified.
+func (old Headers) Update(update Headers) {
+	if old == nil {
+		old = update.clone()
+		return
+	}
+	for name, values := range update {
+		for i, value := range values {
+			if i == 0 {
+				old.Set(name, value)
+			} else {
+				old.Add(name, value)
+			}
+		}
+	}
+}
+
 // get is like Get, but key must already be in CanonicalHeaderKey form.
-func (h Header) get(key string) string {
+func (h Headers) get(key string) string {
 	if v := h[key]; len(v) > 0 {
 		return v[0]
 	}
@@ -46,13 +167,23 @@ func (h Header) get(key string) string {
 }
 
 // Del deletes the values associated with key.
-func (h Header) Del(key string) {
+func (h Headers) Del(key string) {
 	textproto.MIMEHeader(h).Del(key)
 }
 
 // Write writes a header in wire format.
-func (h Header) Write(w io.Writer) error {
+func (h Headers) Write(w io.Writer) error {
 	return h.WriteSubset(w, nil)
+}
+
+func (h Headers) clone() Headers {
+	h2 := make(Headers, len(h))
+	for k, vv := range h {
+		vv2 := make([]string, len(vv))
+		copy(vv2, vv)
+		h2[k] = vv2
+	}
+	return h2
 }
 
 var headerNewlineToSpace = strings.NewReplacer("\n", " ", "\r", " ")
@@ -75,66 +206,55 @@ type keyValues struct {
 	values []string
 }
 
-type byKey []keyValues
+// A headerSorter implements sort.Interface by sorting a []keyValues
+// by key. It's used as a pointer, so it can fit in a sort.Interface
+// interface value without allocation.
+type headerSorter struct {
+	kvs []keyValues
+}
 
-func (s byKey) Len() int           { return len(s) }
-func (s byKey) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
-func (s byKey) Less(i, j int) bool { return s[i].key < s[j].key }
+func (s *headerSorter) Len() int           { return len(s.kvs) }
+func (s *headerSorter) Swap(i, j int)      { s.kvs[i], s.kvs[j] = s.kvs[j], s.kvs[i] }
+func (s *headerSorter) Less(i, j int) bool { return s.kvs[i].key < s.kvs[j].key }
 
-func (h Header) sortedKeyValues(exclude map[string]bool) []keyValues {
-	kvs := make([]keyValues, 0, len(h))
+// TODO: convert this to a sync.Cache (issue 4720)
+var headerSorterCache = make(chan *headerSorter, 8)
+
+// sortedKeyValues returns h's keys sorted in the returned kvs
+// slice. The headerSorter used to sort is also returned, for possible
+// return to headerSorterCache.
+func (h Headers) sortedKeyValues(exclude map[string]bool) (kvs []keyValues, hs *headerSorter) {
+	select {
+	case hs = <-headerSorterCache:
+	default:
+		hs = new(headerSorter)
+	}
+	if cap(hs.kvs) < len(h) {
+		hs.kvs = make([]keyValues, 0, len(h))
+	}
+	kvs = hs.kvs[:0]
 	for k, vv := range h {
 		if !exclude[k] {
 			kvs = append(kvs, keyValues{k, vv})
 		}
 	}
-	sort.Sort(byKey(kvs))
-	return kvs
-}
-
-func isASCIISpace(b byte) bool {
-	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
-}
-
-func trimString(s string) string {
-	for len(s) > 0 && isASCIISpace(s[0]) {
-		s = s[1:]
-	}
-	for len(s) > 0 && isASCIISpace(s[len(s)-1]) {
-		s = s[:len(s)-1]
-	}
-	return s
-}
-
-func (h Header) String() string {
-	buf := bytes.Buffer{}
-	
-	for _, kv := range h.sortedKeyValues(nil) {
-		for _, v := range kv.values {
-			v = headerNewlineToSpace.Replace(v)
-			v = trimString(v)
-			for _, s := range []string{kv.key, ": ", v, "\r\n"} {
-				if _, err := buf.WriteString(s); err != nil {
-					return ""
-				}
-			}
-		}
-	}
-	
-	return buf.String()
+	hs.kvs = kvs
+	sort.Sort(hs)
+	return kvs, hs
 }
 
 // WriteSubset writes a header in wire format.
 // If exclude is not nil, keys where exclude[key] == true are not written.
-func (h Header) WriteSubset(w io.Writer, exclude map[string]bool) error {
+func (h Headers) WriteSubset(w io.Writer, exclude map[string]bool) error {
 	ws, ok := w.(writeStringer)
 	if !ok {
 		ws = stringWriter{w}
 	}
-	for _, kv := range h.sortedKeyValues(exclude) {
+	kvs, sorter := h.sortedKeyValues(exclude)
+	for _, kv := range kvs {
 		for _, v := range kv.values {
 			v = headerNewlineToSpace.Replace(v)
-			v = trimString(v)
+			v = textproto.TrimString(v)
 			for _, s := range []string{kv.key, ": ", v, "\r\n"} {
 				if _, err := ws.WriteString(s); err != nil {
 					return err
@@ -142,15 +262,12 @@ func (h Header) WriteSubset(w io.Writer, exclude map[string]bool) error {
 			}
 		}
 	}
+	select {
+	case headerSorterCache <- sorter:
+	default:
+	}
 	return nil
 }
-
-// CanonicalHeaderKey returns the canonical format of the
-// header key s.  The canonicalization converts the first
-// letter and any letter following a hyphen to upper case;
-// the rest are converted to lowercase.  For example, the
-// canonical key for "accept-encoding" is "Accept-Encoding".
-func CanonicalHeaderKey(s string) string { return textproto.CanonicalMIMEHeaderKey(s) }
 
 // hasToken returns whether token appears with v, ASCII
 // case-insensitive, with space or comma boundaries.
