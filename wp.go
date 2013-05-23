@@ -20,6 +20,7 @@ type Stream interface {
 	Connection() Connection
 	Headers() Headers
 	Run()
+	ReceiveFrame(Frame)
 	State() *StreamState
 	Stop()
 	StreamID() uint32

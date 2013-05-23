@@ -17,7 +17,6 @@ type serverStream struct {
 	streamID        uint32
 	requestBody     *bytes.Buffer
 	state           *StreamState
-	input           <-chan Frame
 	output          chan<- Frame
 	request         *Request
 	handler         Handler
@@ -51,12 +50,19 @@ func (s *serverStream) Push(resource string) (PushWriter, error) {
 	return s.conn.Push(resource, s)
 }
 
+func (s *serverStream) ReceiveFrame(frame Frame) {
+	s.Lock()
+	s.receiveFrame(frame)
+	s.Unlock()
+}
+
 func (s *serverStream) State() *StreamState {
 	return s.state
 }
 
 func (s *serverStream) Stop() {
 	s.stop = true
+	s.done <- struct{}{}
 }
 
 func (s *serverStream) StreamID() uint32 {
@@ -69,8 +75,6 @@ func (s *serverStream) Write(inputData []byte) (int, error) {
 		return 0, errors.New("Error: Stream already closed.")
 	}
 
-	// Check any frames received since last call.
-	s.processInput()
 	if s.stop {
 		return 0, ErrCancelled
 	}
@@ -186,39 +190,6 @@ func (s *serverStream) receiveFrame(frame Frame) {
 	}
 }
 
-// wait blocks until a frame is received
-// or the input channel is closed. If a
-// frame is received, it is processed.
-func (s *serverStream) wait() {
-	frame := <-s.input
-	if frame == nil {
-		return
-	}
-	s.receiveFrame(frame)
-}
-
-// processInput processes any frames currently
-// queued in the input channel, but does not
-// wait once the channel has been cleared, or
-// if it is empty immediately.
-func (s *serverStream) processInput() {
-	var frame Frame
-	var ok bool
-
-	for {
-		select {
-		case frame, ok = <-s.input:
-			if !ok {
-				return
-			}
-			s.receiveFrame(frame)
-
-		default:
-			return
-		}
-	}
-}
-
 // run is the main control path of
 // the stream. It is prepared, the
 // registered handler is called,
@@ -229,7 +200,6 @@ func (s *serverStream) Run() {
 
 	// Make sure Request is prepared.
 	s.requestBody = new(bytes.Buffer) // TODO
-	s.processInput()
 	s.request.Body = &readCloserBuffer{s.requestBody}
 
 	/***************
@@ -269,10 +239,11 @@ func (s *serverStream) Run() {
 		s.output <- data
 	}
 
+	s.Wait()
+
 	// Clean up state.
 	s.state.CloseHere()
 	s.conn.done.Done()
-	s.done <- struct{}{}
 }
 
 // Wait will block until the stream

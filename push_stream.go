@@ -59,6 +59,10 @@ func (p *pushStream) Headers() Headers {
 	return p.headers
 }
 
+func (p *pushStream) ReceiveFrame(frame Frame) {
+	panic("Error: Push cannot receive frames.")
+}
+
 func (p *pushStream) State() *StreamState {
 	return p.state
 }

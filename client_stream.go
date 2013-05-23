@@ -14,7 +14,6 @@ type clientStream struct {
 	conn            *clientConnection
 	streamID        uint32
 	state           *StreamState
-	input           <-chan Frame
 	output          chan<- Frame
 	request         *Request
 	receiver        Receiver
@@ -42,6 +41,12 @@ func (s *clientStream) Push(string) (PushWriter, error) {
 	panic("Error: Request stream cannot push.")
 }
 
+func (s *clientStream) ReceiveFrame(frame Frame) {
+	s.Lock()
+	s.receiveFrame(frame)
+	s.Unlock()
+}
+
 func (s *clientStream) State() *StreamState {
 	return s.state
 }
@@ -54,6 +59,7 @@ func (s *clientStream) Stop() {
 		rst.Status = FINISH_STREAM
 		s.output <- rst
 	}
+	s.done <- struct{}{}
 }
 
 func (s *clientStream) StreamID() uint32 {
@@ -66,8 +72,6 @@ func (s *clientStream) Write(inputData []byte) (int, error) {
 		return 0, errors.New("Error: Stream already closed.")
 	}
 
-	// Check any frames received since last call.
-	s.processInput()
 	if s.stop {
 		return 0, ErrCancelled
 	}
@@ -164,39 +168,6 @@ func (s *clientStream) receiveFrame(frame Frame) {
 	}
 }
 
-// wait blocks until a frame is received
-// or the input channel is closed. If a
-// frame is received, it is processed.
-func (s *clientStream) wait() {
-	frame := <-s.input
-	if frame == nil {
-		return
-	}
-	s.receiveFrame(frame)
-}
-
-// processInput processes any frames currently
-// queued in the input channel, but does not
-// wait once the channel has been cleared, or
-// if it is empty immediately.
-func (s *clientStream) processInput() {
-	var frame Frame
-	var ok bool
-
-	for {
-		select {
-		case frame, ok = <-s.input:
-			if !ok {
-				return
-			}
-			s.receiveFrame(frame)
-
-		default:
-			return
-		}
-	}
-}
-
 // Run is the main control path of
 // the stream. Data is recieved,
 // processed, and then the stream
@@ -205,14 +176,11 @@ func (s *clientStream) Run() {
 	s.conn.done.Add(1)
 
 	// Receive and process inbound frames.
-	for frame := range s.input {
-		s.receiveFrame(frame)
-	}
+	s.Wait()
 
 	// Clean up state.
 	s.state.CloseHere()
 	s.conn.done.Done()
-	s.done <- struct{}{}
 }
 
 // Wait will block until the stream

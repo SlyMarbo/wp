@@ -24,19 +24,18 @@ type clientConnection struct {
 	buf                *bufio.Reader // buffered reader for the connection.
 	tlsState           *tls.ConnectionState
 	streams            map[uint32]Stream
-	streamInputs       map[uint32]chan<- Frame // sending frames to streams.
-	dataOutput         chan Frame              // receiving frames from streams to send.
-	pings              map[uint32]chan<- bool  // response channel for pings.
-	pingID             uint32                  // next outbound ping ID.
-	compressor         *Compressor             // outbound compression state.
-	decompressor       *Decompressor           // inbound decompression state.
-	nextServerStreamID uint32                  // next inbound stream ID. (even)
-	nextClientStreamID uint32                  // next outbound stream ID. (odd)
-	version            uint8                   // WP version.
-	numBenignErrors    int                     // number of non-serious errors encountered.
-	done               *sync.WaitGroup         // WaitGroup for active streams.
-	pushReceiver       Receiver                // Receiver used to process server pushes.
-	pushRequests       map[uint32]*Request     // map of requests sent in server pushes.
+	dataOutput         chan Frame             // receiving frames from streams to send.
+	pings              map[uint32]chan<- bool // response channel for pings.
+	pingID             uint32                 // next outbound ping ID.
+	compressor         *Compressor            // outbound compression state.
+	decompressor       *Decompressor          // inbound decompression state.
+	nextServerStreamID uint32                 // next inbound stream ID. (even)
+	nextClientStreamID uint32                 // next outbound stream ID. (odd)
+	version            uint8                  // WP version.
+	numBenignErrors    int                    // number of non-serious errors encountered.
+	done               *sync.WaitGroup        // WaitGroup for active streams.
+	pushReceiver       Receiver               // Receiver used to process server pushes.
+	pushRequests       map[uint32]*Request    // map of requests sent in server pushes.
 }
 
 // readFrames is the main processing loop, where frames
@@ -255,8 +254,6 @@ func (conn *clientConnection) Request(req *Request, res Receiver) (Stream, error
 	// Send.
 	conn.Lock()
 	syn.streamID = conn.nextClientStreamID
-	input := make(chan Frame)
-	conn.streamInputs[syn.streamID] = input
 	conn.nextClientStreamID += 2
 	conn.WriteFrame(syn)
 	for _, frame := range body {
@@ -270,7 +267,6 @@ func (conn *clientConnection) Request(req *Request, res Receiver) (Stream, error
 	out.streamID = syn.streamID
 	out.state = new(StreamState)
 	out.state.CloseHere()
-	out.input = input
 	out.output = conn.dataOutput
 	out.request = req
 	out.receiver = res
@@ -308,7 +304,8 @@ func (conn *clientConnection) handleResponse(frame *ResponseFrame) {
 	}
 
 	// Check stream is open.
-	if stream, ok := conn.streams[sid]; !ok || stream == nil || stream.State().ClosedThere() {
+	stream, ok := conn.streams[sid]
+	if !ok || stream == nil || stream.State().ClosedThere() {
 		log.Printf("Error: Received Response with Stream ID %d, which is closed or unopened.\n", sid)
 		conn.numBenignErrors++
 		return
@@ -317,11 +314,12 @@ func (conn *clientConnection) handleResponse(frame *ResponseFrame) {
 	// Stream ID is fine.
 
 	// Send headers to stream.
-	conn.streamInputs[sid] <- frame
+	stream.ReceiveFrame(frame)
 
 	// Handle flags.
 	if frame.flags&FLAG_FIN != 0 {
-		conn.streams[sid].State().CloseThere()
+		stream.State().CloseThere()
+		stream.Stop()
 	}
 }
 
@@ -462,7 +460,8 @@ func (conn *clientConnection) handleData(frame *DataFrame) {
 	}
 
 	// Check stream is open.
-	if stream, ok := conn.streams[sid]; !ok || stream == nil || stream.State().ClosedThere() {
+	stream, ok := conn.streams[sid]
+	if !ok || stream == nil || stream.State().ClosedThere() {
 		log.Printf("Error: Received Data with Stream ID %d, which is closed or unopened.\n", sid)
 		conn.numBenignErrors++
 		return
@@ -471,13 +470,12 @@ func (conn *clientConnection) handleData(frame *DataFrame) {
 	// Stream ID is fine.
 
 	// Send data to stream.
-	conn.streamInputs[sid] <- frame
+	stream.ReceiveFrame(frame)
 
 	// Handle flags.
 	if frame.flags&FLAG_FIN != 0 {
-		conn.streams[sid].State().CloseThere()
-		close(conn.streamInputs[sid])
-		delete(conn.streamInputs, sid)
+		stream.State().CloseThere()
+		stream.Stop()
 	}
 }
 
@@ -501,7 +499,8 @@ func (conn *clientConnection) handleHeaders(frame *HeadersFrame) {
 	}
 
 	// Check stream is open.
-	if stream, ok := conn.streams[sid]; !ok || stream == nil || stream.State().ClosedThere() {
+	stream, ok := conn.streams[sid]
+	if !ok || stream == nil || stream.State().ClosedThere() {
 		log.Printf("Error: Received Headers with Stream ID %d, which is closed or unopened.\n", sid)
 		conn.numBenignErrors++
 		return
@@ -510,11 +509,12 @@ func (conn *clientConnection) handleHeaders(frame *HeadersFrame) {
 	// Stream ID is fine.
 
 	// Send headers to stream.
-	conn.streamInputs[sid] <- frame
+	stream.ReceiveFrame(frame)
 
 	// Handle flags.
 	if frame.flags&FLAG_FIN != 0 {
-		conn.streams[sid].State().CloseThere()
+		stream.State().CloseThere()
+		stream.Stop()
 	}
 }
 
@@ -535,10 +535,14 @@ func (conn *clientConnection) closeStream(streamID uint32) {
 		return
 	}
 
-	conn.streams[streamID].Stop()
-	conn.streams[streamID].State().Close()
-	close(conn.streamInputs[streamID])
-	delete(conn.streamInputs, streamID)
+	stream, ok := conn.streams[streamID]
+	if !ok {
+		log.Printf("Error: Tried to close closed stream %d.\n", streamID)
+		return
+	}
+
+	stream.State().Close()
+	stream.Stop()
 	delete(conn.streams, streamID)
 }
 
@@ -560,11 +564,9 @@ func (conn *clientConnection) PROTOCOL_ERROR(streamID uint32) {
 // aid garbage collection before the connection
 // is closed.
 func (conn *clientConnection) cleanup() {
-	for streamID, c := range conn.streamInputs {
-		close(c)
-		conn.streams[streamID].Stop()
+	for _, stream := range conn.streams {
+		stream.Stop()
 	}
-	conn.streamInputs = nil
 	conn.streams = nil
 }
 
@@ -606,7 +608,6 @@ func newClientConn(tlsConn *tls.Conn) *clientConnection {
 	conn.tlsState = new(tls.ConnectionState)
 	*conn.tlsState = tlsConn.ConnectionState()
 	conn.streams = make(map[uint32]Stream)
-	conn.streamInputs = make(map[uint32]chan<- Frame)
 	conn.dataOutput = make(chan Frame)
 	conn.pings = make(map[uint32]chan<- bool)
 	conn.pingID = 1
