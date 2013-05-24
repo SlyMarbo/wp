@@ -2,7 +2,6 @@ package wp
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,7 +32,7 @@ type Response struct {
 	// omitted from Header.
 	//
 	// Keys in the map are canonicalized (see CanonicalHeaderKey).
-	Headers Headers
+	Header http.Header
 
 	// Body represents the response body.
 	//
@@ -64,12 +63,12 @@ type Response struct {
 
 	// Trailer maps trailer keys to values, in the same
 	// format as the header.
-	Trailer Headers
+	Trailer http.Header
 
 	// The Request that was sent to obtain this Response.
 	// Request's Body is nil (having already been consumed).
 	// This is only populated for Client requests.
-	Request *Request
+	Request *http.Request
 }
 
 // Cookies parses and returns the cookies set in the Set-Cookie headers.
@@ -77,16 +76,14 @@ func (r *Response) Cookies() []*http.Cookie {
 	return wpToHttpResponse(r, r.Request).Cookies()
 }
 
-var ErrNoLocation = errors.New("no Location header in response")
-
 // Location returns the URL of the response's "Location" header,
 // if present.  Relative redirects are resolved relative to
 // the Response's Request.  ErrNoLocation is returned if no
 // Location header is present.
 func (r *Response) Location() (*url.URL, error) {
-	lv := r.Headers.Get("Location")
+	lv := r.Header.Get("Location")
 	if lv == "" {
-		return nil, ErrNoLocation
+		return nil, http.ErrNoLocation
 	}
 	if r.Request != nil && r.Request.URL != nil {
 		return r.Request.URL.Parse(lv)
@@ -104,31 +101,44 @@ func (r *Response) ProtoAtLeast(major, minor int) bool {
 type response struct {
 	StatusCode    int
 	StatusSubcode int
-	Headers       Headers
+	Header        http.Header
 	Data          *bytes.Buffer
-	Request       *Request
+	Request       *http.Request
+	Receiver      Receiver
 }
 
-func (r *response) ReceiveData(req *Request, data []byte, finished bool) {
+func (r *response) ReceiveData(req *http.Request, data []byte, finished bool) {
 	r.Data.Write(data)
+	if r.Receiver != nil {
+		r.Receiver.ReceiveData(req, data, finished)
+	}
 }
 
 var statusRegex = regexp.MustCompile(`\A\s*(?P<code>\d+)`)
 
-func (r *response) ReceiveHeaders(req *Request, headers Headers) {
-	if r.Headers == nil {
-		r.Headers = make(Headers)
+func (r *response) ReceiveHeaders(req *http.Request, headers http.Header) {
+	if r.Header == nil {
+		r.Header = make(http.Header)
 	}
-	r.Headers.Update(headers)
+	updateHeaders(r.Header, headers)
+	if r.Receiver != nil {
+		r.Receiver.ReceiveHeaders(req, headers)
+	}
 }
 
-func (r *response) ReceiveRequest(req *Request) bool {
+func (r *response) ReceiveRequest(req *http.Request) bool {
+	if r.Receiver != nil {
+		return r.Receiver.ReceiveRequest(req)
+	}
 	return false
 }
 
-func (r *response) ReceiveResponse(req *Request, code, subcode uint8) {
+func (r *response) ReceiveResponse(req *http.Request, code, subcode uint8) {
 	r.StatusCode = int(code)
 	r.StatusSubcode = int(subcode)
+	if r.Receiver != nil {
+		r.Receiver.ReceiveResponse(req, code, subcode)
+	}
 }
 
 func (r *response) Response() *Response {
@@ -147,34 +157,34 @@ func (r *response) Response() *Response {
 	out.ProtoMinor = 1
 	out.WpProto = 2
 	out.SentOverWp = true
-	out.Headers = r.Headers
+	out.Header = r.Header
 	out.Body = &readCloserBuffer{r.Data}
 	out.ContentLength = int64(r.Data.Len())
 	out.TransferEncoding = nil
 	out.Close = false
-	out.Trailer = make(Headers)
+	out.Trailer = make(http.Header)
 	out.Request = r.Request
 	return out
 }
 
-func wpToHttpResponse(res *Response, req *Request) *http.Response {
+func wpToHttpResponse(res *Response, req *http.Request) *http.Response {
 	out := new(http.Response)
 	out.Status = res.Status
 	out.StatusCode = res.StatusCode
 	out.Proto = res.Proto
 	out.ProtoMajor = res.ProtoMajor
 	out.ProtoMinor = res.ProtoMinor
-	out.Header = http.Header(res.Headers)
+	out.Header = res.Header
 	out.Body = res.Body
 	out.ContentLength = res.ContentLength
 	out.TransferEncoding = res.TransferEncoding
 	out.Close = res.Close
-	out.Trailer = http.Header(res.Trailer)
-	out.Request = wpToHttpRequest(req)
+	out.Trailer = res.Trailer
+	out.Request = req
 	return out
 }
 
-func httpToWpResponse(res *http.Response, req *Request) *Response {
+func httpToWpResponse(res *http.Response, req *http.Request) *Response {
 	out := new(Response)
 	out.Status = res.Status
 	out.StatusCode = res.StatusCode
@@ -183,12 +193,12 @@ func httpToWpResponse(res *http.Response, req *Request) *Response {
 	out.ProtoMinor = res.ProtoMinor
 	out.WpProto = -1
 	out.SentOverWp = false
-	out.Headers = Headers(res.Header)
+	out.Header = res.Header
 	out.Body = res.Body
 	out.ContentLength = res.ContentLength
 	out.TransferEncoding = res.TransferEncoding
 	out.Close = res.Close
-	out.Trailer = Headers(res.Trailer)
+	out.Trailer = res.Trailer
 	out.Request = req
 	return out
 }

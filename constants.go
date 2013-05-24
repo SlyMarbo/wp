@@ -87,6 +87,11 @@ const MAX_DATA_SIZE = 0xfffff7
 // Maximum stream ID (2 ** 31 -1).
 const MAX_STREAM_ID = 0x7fffffff
 
+const (
+	MAX_PRIORITY = 0
+	MIN_PRIORITY = 7
+)
+
 // readCloserBuffer is a helper structure
 // to allow a bytes buffer to satisfy the
 // io.ReadCloser interface.
@@ -480,30 +485,22 @@ var (
 // _httpResponseWriter is just a wrapper used
 // to allow a spdy.ResponseWriter to fulfil
 // the http.ResponseWriter interface.
-type _httpResponseWriter struct {
+type httpResponseWriter struct {
 	ResponseWriter
 }
 
-func (h *_httpResponseWriter) Header() http.Header {
-	return http.Header(h.ResponseWriter.Headers())
-}
-
-func (h *_httpResponseWriter) WriteHeader(code int) {
+func (h *httpResponseWriter) WriteHeader(code int) {
 	h.WriteResponse(httpToWpResponseCode(code))
 }
 
 // _httpResponseWriter is just a wrapper used
 // to allow a spdy.PushWriter to fulfil the
 // http.ResponseWriter interface.
-type _httpPushWriter struct {
+type httpPushWriter struct {
 	PushWriter
 }
 
-func (h *_httpPushWriter) Header() http.Header {
-	return http.Header(h.PushWriter.Headers())
-}
-
-func (h *_httpPushWriter) WriteHeader(int) {
+func (h *httpPushWriter) WriteHeader(int) {
 	h.WriteHeaders()
 }
 
@@ -640,7 +637,7 @@ func httpToWpResponseCode(code int) (int, int) {
 }
 
 // Compression header for WP.
-var HeaderDictionary = []byte{
+var headerDictionary = []byte{
 	0x00, 0x00, 0x00, 0x07, 0x6f, 0x70, 0x74, 0x69, // - - - - o p t i
 	0x6f, 0x6e, 0x73, 0x00, 0x00, 0x00, 0x04, 0x68, // o n s - - - - h
 	0x65, 0x61, 0x64, 0x00, 0x00, 0x00, 0x04, 0x70, // e a d - - - - p

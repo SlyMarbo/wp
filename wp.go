@@ -5,20 +5,21 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net/http"
 	"fmt"
 )
 
 type Connection interface {
 	Ping() <-chan bool
 	Push(string, Stream) (PushWriter, error)
-	Request(*Request, Receiver) (Stream, error)
+	Request(*http.Request, int, Receiver) (Stream, error)
 	WriteFrame(Frame)
 	Version() uint8
 }
 
 type Stream interface {
 	Connection() Connection
-	Headers() Headers
+	Header() http.Header
 	Run()
 	Read([]byte) (int, error)
 	ReceiveFrame(Frame)
@@ -59,10 +60,10 @@ type Frame interface {
 // the push. The provided Request will be that sent by
 // the server with the push.
 type Receiver interface {
-	ReceiveData(request *Request, data []byte, final bool)
-	ReceiveHeaders(request *Request, headers Headers)
-	ReceiveRequest(request *Request) bool
-	ReceiveResponse(request *Request, statusCode uint8, statusSubcode uint8)
+	ReceiveData(request *http.Request, data []byte, final bool)
+	ReceiveHeaders(request *http.Request, headers http.Header)
+	ReceiveRequest(request *http.Request) bool
+	ReceiveResponse(request *http.Request, statusCode uint8, statusSubcode uint8)
 }
 
 func ReadFrame(reader *bufio.Reader) (frame Frame, err error) {
@@ -98,7 +99,7 @@ func ReadFrame(reader *bufio.Reader) (frame Frame, err error) {
 type HeadersFrame struct {
 	flags          byte
 	streamID       uint32
-	Headers        Headers
+	Headers        http.Header
 	rawHeaders     []byte
 	headersDecoded bool
 	headersEncoded bool
@@ -131,8 +132,7 @@ func (frame *HeadersFrame) DecodeHeaders(decom *Decompressor) error {
 		return nil
 	}
 
-	headers := make(Headers)
-	err := headers.Parse(frame.rawHeaders, decom)
+	headers, err := decom.Decompress(frame.rawHeaders)
 	if err != nil {
 		return err
 	}
@@ -143,7 +143,7 @@ func (frame *HeadersFrame) DecodeHeaders(decom *Decompressor) error {
 }
 
 func (frame *HeadersFrame) EncodeHeaders(com *Compressor) error {
-	headers, err := frame.Headers.Compressed(com)
+	headers, err := com.Compress(frame.Headers)
 	if err != nil {
 		return err
 	}
@@ -333,7 +333,7 @@ type RequestFrame struct {
 	flags          uint8
 	Priority       uint8
 	streamID       uint32
-	Headers        Headers
+	Headers        http.Header
 	rawHeaders     []byte
 	headersDecoded bool
 	headersEncoded bool
@@ -368,8 +368,7 @@ func (frame *RequestFrame) DecodeHeaders(decom *Decompressor) error {
 		return nil
 	}
 
-	headers := make(Headers)
-	err := headers.Parse(frame.rawHeaders, decom)
+	headers, err := decom.Decompress(frame.rawHeaders)
 	if err != nil {
 		return err
 	}
@@ -380,7 +379,7 @@ func (frame *RequestFrame) DecodeHeaders(decom *Decompressor) error {
 }
 
 func (frame *RequestFrame) EncodeHeaders(com *Compressor) error {
-	headers, err := frame.Headers.Compressed(com)
+	headers, err := com.Compress(frame.Headers)
 	if err != nil {
 		return err
 	}
@@ -487,7 +486,7 @@ type ResponseFrame struct {
 	streamID        uint32
 	ResponseCode    uint8
 	ResponseSubcode uint8
-	Headers         Headers
+	Headers         http.Header
 	rawHeaders      []byte
 	headersDecoded  bool
 	headersEncoded  bool
@@ -525,8 +524,7 @@ func (frame *ResponseFrame) DecodeHeaders(decom *Decompressor) error {
 		return nil
 	}
 
-	headers := make(Headers)
-	err := headers.Parse(frame.rawHeaders, decom)
+	headers, err := decom.Decompress(frame.rawHeaders)
 	if err != nil {
 		return err
 	}
@@ -537,7 +535,7 @@ func (frame *ResponseFrame) DecodeHeaders(decom *Decompressor) error {
 }
 
 func (frame *ResponseFrame) EncodeHeaders(com *Compressor) error {
-	headers, err := frame.Headers.Compressed(com)
+	headers, err := com.Compress(frame.Headers)
 	if err != nil {
 		return err
 	}
@@ -648,7 +646,7 @@ type PushFrame struct {
 	flags              byte
 	streamID           uint32
 	AssociatedStreamID uint32
-	Headers            Headers
+	Headers            http.Header
 	rawHeaders         []byte
 	headersDecoded     bool
 	headersEncoded     bool
@@ -685,8 +683,7 @@ func (frame *PushFrame) DecodeHeaders(decom *Decompressor) error {
 		return nil
 	}
 
-	headers := make(Headers)
-	err := headers.Parse(frame.rawHeaders, decom)
+	headers, err := decom.Decompress(frame.rawHeaders)
 	if err != nil {
 		return err
 	}
@@ -697,7 +694,7 @@ func (frame *PushFrame) DecodeHeaders(decom *Decompressor) error {
 }
 
 func (frame *PushFrame) EncodeHeaders(com *Compressor) error {
-	headers, err := frame.Headers.Compressed(com)
+	headers, err := com.Compress(frame.Headers)
 	if err != nil {
 		return err
 	}
@@ -1011,4 +1008,26 @@ func (frame *PingFrame) WriteTo(writer io.Writer) error {
 
 	err := Write(writer, out)
 	return err
+}
+
+func cloneHeaders(h http.Header) http.Header {
+	h2 := make(http.Header, len(h))
+	for k, vv := range h {
+		vv2 := make([]string, len(vv))
+		copy(vv2, vv)
+		h2[k] = vv2
+	}
+	return h2
+}
+
+func updateHeaders(older, newer http.Header) {
+	for name, values := range newer {
+		for i, value := range values {
+			if i == 0 {
+				older.Set(name, value)
+			} else {
+				older.Add(name, value)
+			}
+		}
+	}
 }

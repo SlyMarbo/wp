@@ -51,12 +51,17 @@ type Client struct {
 	//
 	// If CheckRedirect is nil, the Client uses its default policy,
 	// which is to stop after 10 consecutive requests.
-	CheckRedirect func(req *Request, via []*Request) error
+	CheckRedirect func(req *http.Request, via []*http.Request) error
 
 	// Jar specifies the cookie jar.
 	// If Jar is nil, cookies are not sent in requests and ignored
 	// in responses.
 	Jar http.CookieJar
+
+	// Receiver is used to receive the server's response. If left
+	// nil, the default Receiver will parse and create a normal
+	// Response.
+	Receiver Receiver
 
 	// PushReceiver is used to receive server pushes. If left nil,
 	// pushes will be refused. The provided Request will be that
@@ -93,14 +98,13 @@ func (c *Client) dial(u *url.URL) (net.Conn, error) {
 }
 
 // doHTTP is used to process an HTTP(S) request, using the TCP connection pool.
-func (c *Client) doHTTP(conn net.Conn, req *Request) (*Response, error) {
+func (c *Client) doHTTP(conn net.Conn, req *http.Request) (*Response, error) {
 	debug.Printf("Requesting %q over HTTP.\n", req.URL.String())
 
 	// Create the HTTP ClientConn, which handles the
 	// HTTP details.
 	httpConn := httputil.NewClientConn(conn, nil)
-	httpReq := wpToHttpRequest(req)
-	httpRes, err := httpConn.Do(httpReq)
+	httpRes, err := httpConn.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +124,7 @@ func (c *Client) doHTTP(conn net.Conn, req *Request) (*Response, error) {
 }
 
 // doTalk is used to connect to a server for a two-way discussion.
-func (c *Client) doTalk(req *Request, rec Receiver) (Stream, error) {
+func (c *Client) doTalk(req *http.Request, rec Receiver) (Stream, error) {
 	u := req.URL
 
 	// Make sure the URL host contains the port.
@@ -226,7 +230,7 @@ func (c *Client) doTalk(req *Request, rec Receiver) (Stream, error) {
 	debug.Printf("Starting TALK connection to %q on WP.\n", u.String())
 
 	// Send the request.
-	stream, err := conn.Request(req, rec)
+	stream, err := conn.Request(req, 0, rec)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +244,7 @@ func (c *Client) doTalk(req *Request, rec Receiver) (Stream, error) {
 // do handles the actual request; ensuring a connection is
 // made, determining which protocol to use, and performing
 // the request.
-func (c *Client) do(req *Request) (*Response, error) {
+func (c *Client) do(req *http.Request, priority int) (*Response, error) {
 	u := req.URL
 
 	// Make sure the URL host contains the port.
@@ -372,9 +376,10 @@ func (c *Client) do(req *Request) (*Response, error) {
 	res := new(response)
 	res.Request = req
 	res.Data = new(bytes.Buffer)
+	res.Receiver = c.Receiver
 
 	// Send the request.
-	stream, err := conn.Request(req, res)
+	stream, err := conn.Request(req, priority, res)
 	if err != nil {
 		return nil, err
 	}
@@ -386,13 +391,13 @@ func (c *Client) do(req *Request) (*Response, error) {
 }
 
 // doFollowingRedirects follows redirects while using c.do to actually process each request.
-func (c *Client) doFollowingRedirects(ireq *Request, shouldRedirect func(int) bool) (res *Response, err error) {
+func (c *Client) doFollowingRedirects(ireq *http.Request, priority int, shouldRedirect func(int) bool) (res *Response, err error) {
 	var base *url.URL
 	redirectChecker := c.CheckRedirect
 	if redirectChecker == nil {
 		redirectChecker = defaultCheckRedirect
 	}
-	var via []*Request
+	var via []*http.Request
 
 	if ireq.URL == nil {
 		return nil, errors.New("nil Request.URL")
@@ -403,12 +408,12 @@ func (c *Client) doFollowingRedirects(ireq *Request, shouldRedirect func(int) bo
 	redirectFailed := false
 	for redirect := 0; ; redirect++ {
 		if redirect != 0 {
-			req = new(Request)
+			req = new(http.Request)
 			req.Method = ireq.Method
 			if ireq.Method == "POST" || ireq.Method == "PUT" {
 				req.Method = "GET"
 			}
-			req.Headers = make(Headers)
+			req.Header = make(http.Header)
 			req.URL, err = base.Parse(urlStr)
 			if err != nil {
 				break
@@ -426,7 +431,7 @@ func (c *Client) doFollowingRedirects(ireq *Request, shouldRedirect func(int) bo
 				// Add the Referer header.
 				lastReq := via[len(via)-1]
 				if lastReq.URL.Scheme != "https" {
-					req.Headers.Set("Referer", lastReq.URL.String())
+					req.Header.Set("Referer", lastReq.URL.String())
 				}
 
 				err = redirectChecker(req, via)
@@ -438,13 +443,13 @@ func (c *Client) doFollowingRedirects(ireq *Request, shouldRedirect func(int) bo
 		}
 
 		urlStr = req.URL.String()
-		if res, err = c.do(req); err != nil {
+		if res, err = c.do(req, priority); err != nil {
 			break
 		}
 
 		if shouldRedirect(res.StatusCode) {
 			res.Body.Close()
-			if urlStr = res.Headers.Get("Location"); urlStr == "" {
+			if urlStr = res.Header.Get("Location"); urlStr == "" {
 				err = errors.New(fmt.Sprintf("%d response missing Location header", res.StatusCode))
 				break
 			}
@@ -483,14 +488,14 @@ func (c *Client) doFollowingRedirects(ireq *Request, shouldRedirect func(int) bo
 // the server does not support SPDY. Which protocol was
 // used can be determined by checking the value set for
 // Response.SentOverSpdy.
-func (c *Client) Do(req *Request) (*Response, error) {
+func (c *Client) Do(req *http.Request, priority int) (*Response, error) {
 	if req.Method == "GET" || req.Method == "HEAD" {
-		return c.doFollowingRedirects(req, shouldRedirectGet)
+		return c.doFollowingRedirects(req, priority, shouldRedirectGet)
 	}
 	if req.Method == "POST" || req.Method == "PUT" {
-		return c.doFollowingRedirects(req, shouldRedirectPost)
+		return c.doFollowingRedirects(req, priority, shouldRedirectPost)
 	}
-	return c.do(req)
+	return c.do(req, priority)
 }
 
 // True if the specified HTTP status code is one for
@@ -516,7 +521,7 @@ func shouldRedirectPost(statusCode int) bool {
 
 // defaultCheckRedirect simply accepts redirects until 10 have
 // occurred, or a loop is detected.
-func defaultCheckRedirect(req *Request, via []*Request) error {
+func defaultCheckRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")
 	}
@@ -540,7 +545,7 @@ func Talk(url string, rec Receiver) (Stream, error) {
 // Talk is used to create a two-way connection to the specified
 // URL. This is only compatible with WP servers.
 func (c *Client) Talk(url string, rec Receiver) (Stream, error) {
-	req, err := NewRequest("TALK", url, nil, DefaultPriority(url))
+	req, err := http.NewRequest("TALK", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -585,11 +590,11 @@ func Get(url string) (*Response, error) {
 // When err is nil, resp always contains a non-nil resp.Body.
 // Caller should close resp.Body when done reading from it.
 func (c *Client) Get(url string) (*Response, error) {
-	req, err := NewRequest("GET", url, nil, DefaultPriority(url))
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	return c.doFollowingRedirects(req, shouldRedirectGet)
+	return c.doFollowingRedirects(req, DefaultPriority(url), shouldRedirectGet)
 }
 
 // Post issues a POST to the specified URL.
@@ -605,12 +610,12 @@ func Post(url string, bodyType string, body io.Reader) (*Response, error) {
 //
 // Caller should close resp.Body when done reading from it.
 func (c *Client) Post(url string, bodyType string, body io.Reader) (*Response, error) {
-	req, err := NewRequest("POST", url, body, DefaultPriority(url))
+	req, err := http.NewRequest("POST", url, body)
 	if err != nil {
 		return nil, err
 	}
-	req.Headers.Set("Content-Type", bodyType)
-	return c.doFollowingRedirects(req, shouldRedirectPost)
+	req.Header.Set("Content-Type", bodyType)
+	return c.doFollowingRedirects(req, DefaultPriority(url), shouldRedirectPost)
 }
 
 // PostForm issues a POST to the specified URL, with data's keys and
@@ -656,11 +661,11 @@ func Head(url string) (resp *Response, err error) {
 //    303 (See Other)
 //    307 (Temporary Redirect)
 func (c *Client) Head(url string) (resp *Response, err error) {
-	req, err := NewRequest("HEAD", url, nil, DefaultPriority(url))
+	req, err := http.NewRequest("HEAD", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	return c.doFollowingRedirects(req, shouldRedirectGet)
+	return c.doFollowingRedirects(req, DefaultPriority(url), shouldRedirectGet)
 }
 
 // Given a string of the form "host", "host:port", or "[ipv6::address]:port",

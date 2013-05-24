@@ -206,7 +206,7 @@ func (conn *serverConnection) newStream(frame *RequestFrame, output chan<- Frame
 	stream.streamID = frame.streamID
 	stream.state = new(StreamState)
 	stream.output = output
-	stream.headers = make(Headers)
+	stream.headers = make(http.Header)
 	stream.version = conn.version
 	stream.done = make(chan struct{}, 1)
 
@@ -223,14 +223,13 @@ func (conn *serverConnection) newStream(frame *RequestFrame, output chan<- Frame
 	}
 
 	// Build this into a request to present to the Handler.
-	stream.request = &Request{
+	stream.request = &http.Request{
 		URL:        url,
 		Proto:      "HTTP/1.1",
 		ProtoMajor: 1,
 		ProtoMinor: 1,
-		Priority:   int(frame.Priority),
 		RemoteAddr: conn.remoteAddr,
-		Headers:    headers,
+		Header:     headers,
 		Host:       url.Host,
 		RequestURI: url.Path,
 		TLS:        conn.tlsState,
@@ -287,7 +286,7 @@ func (conn *serverConnection) Push(resource string, origin Stream) (PushWriter, 
 		return nil, errors.New("Error: Incomplete path provided to resource.")
 	}
 
-	headers := make(Headers)
+	headers := make(http.Header)
 	headers.Set(":host", url.Host)
 	headers.Set(":path", url.Path)
 	push.Headers = headers
@@ -307,7 +306,7 @@ func (conn *serverConnection) Push(resource string, origin Stream) (PushWriter, 
 	out.origin = origin
 	out.state = new(StreamState)
 	out.output = conn.dataPriority[7]
-	out.headers = make(Headers)
+	out.headers = make(http.Header)
 	out.stop = false
 	out.version = conn.version
 
@@ -319,7 +318,7 @@ func (conn *serverConnection) Push(resource string, origin Stream) (PushWriter, 
 
 // Request is a method stub required to satisfy the Connection
 // interface. It must not be used by servers.
-func (conn *serverConnection) Request(req *Request, res Receiver) (Stream, error) {
+func (conn *serverConnection) Request(req *http.Request, priority int, res Receiver) (Stream, error) {
 	return nil, errors.New("Error: Servers cannot make requests.")
 }
 
@@ -365,6 +364,7 @@ func (conn *serverConnection) handleRequest(frame *RequestFrame) {
 	// Create and start new stream.
 	nextStream := conn.newStream(frame, conn.dataPriority[frame.Priority])
 	if nextStream == nil { // Make sure an error didn't occur when making the stream.
+		log.Println("Failed to create stream.")
 		return
 	}
 
@@ -601,14 +601,6 @@ func (conn *serverConnection) serve() {
 
 	// Cleanup before the connection closes.
 	conn.cleanup()
-}
-
-// acceptDefaultWPv2 is used in starting a WP/2 connection from
-// an HTTP server supporting NPN.
-func acceptDefaultWPv2(srv *http.Server, tlsConn *tls.Conn, _ http.Handler) {
-	server := new(Server)
-	server.TLSConfig = srv.TLSConfig
-	acceptWPv2(server, tlsConn, nil)
 }
 
 // acceptWPv2 is used in starting a WP/2 connection from an HTTP

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sync"
 )
 
@@ -18,9 +19,9 @@ type clientStream struct {
 	streamID        uint32
 	state           *StreamState
 	output          chan<- Frame
-	request         *Request
+	request         *http.Request
 	receiver        Receiver
-	headers         Headers
+	headers         http.Header
 	responseCode    int
 	responseSubcode int
 	stop            bool
@@ -32,7 +33,7 @@ func (s *clientStream) Connection() Connection {
 	return s.conn
 }
 
-func (s *clientStream) Headers() Headers {
+func (s *clientStream) Header() http.Header {
 	return s.headers
 }
 
@@ -127,7 +128,7 @@ func (s *clientStream) WriteHeaders() {
 	// Create the HEADERS frame.
 	headers := new(HeadersFrame)
 	headers.streamID = s.streamID
-	headers.Headers = s.headers.clone()
+	headers.Headers = cloneHeaders(s.headers)
 
 	// Clear the headers that have been sent.
 	for name := range headers.Headers {

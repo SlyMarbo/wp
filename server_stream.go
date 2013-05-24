@@ -19,10 +19,10 @@ type serverStream struct {
 	requestBody     *bytes.Buffer
 	state           *StreamState
 	output          chan<- Frame
-	request         *Request
+	request         *http.Request
 	handler         Handler
 	httpHandler     http.Handler
-	headers         Headers
+	headers         http.Header
 	responseCode    int
 	responseSubcode int
 	stop            bool
@@ -39,7 +39,7 @@ func (s *serverStream) Connection() Connection {
 	return s.conn
 }
 
-func (s *serverStream) Headers() Headers {
+func (s *serverStream) Header() http.Header {
 	return s.headers
 }
 
@@ -133,7 +133,7 @@ func (s *serverStream) WriteHeaders() {
 	// Create the HEADERS frame.
 	headers := new(HeadersFrame)
 	headers.streamID = s.streamID
-	headers.Headers = s.headers.clone()
+	headers.Headers = cloneHeaders(s.headers)
 
 	// Clear the headers that have been sent.
 	for name := range headers.Headers {
@@ -157,7 +157,7 @@ func (s *serverStream) WriteResponse(code, subcode int) {
 	// Create the response SYN_REPLY.
 	reply := new(ResponseFrame)
 	reply.streamID = s.streamID
-	reply.Headers = s.headers.clone()
+	reply.Headers = cloneHeaders(s.headers)
 
 	// Clear the headers that have been sent.
 	for name := range reply.Headers {
@@ -189,10 +189,10 @@ func (s *serverStream) receiveFrame(frame Frame) {
 		s.requestBody.Write(frame.Data) // TODO
 
 	case *ResponseFrame:
-		s.headers.Update(frame.Headers)
+		updateHeaders(s.headers, frame.Headers)
 
 	case *HeadersFrame:
-		s.headers.Update(frame.Headers)
+		updateHeaders(s.headers, frame.Headers)
 
 	default:
 		panic(fmt.Sprintf("Received unknown frame of type %T.", frame))
@@ -216,9 +216,8 @@ func (s *serverStream) Run() {
 	 ***************/
 	mux, ok := s.handler.(*ServeMux)
 	if s.handler == nil || (ok && mux.Nil()) {
-		r := wpToHttpRequest(s.request)
-		w := &_httpResponseWriter{s}
-		s.httpHandler.ServeHTTP(w, r)
+		w := &httpResponseWriter{s}
+		s.httpHandler.ServeHTTP(w, s.request)
 	} else {
 		s.handler.ServeWP(s, s.request)
 	}

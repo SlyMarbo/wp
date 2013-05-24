@@ -25,18 +25,18 @@ type clientConnection struct {
 	buf                *bufio.Reader // buffered reader for the connection.
 	tlsState           *tls.ConnectionState
 	streams            map[uint32]Stream
-	dataOutput         chan Frame             // receiving frames from streams to send.
-	pings              map[uint32]chan<- bool // response channel for pings.
-	pingID             uint32                 // next outbound ping ID.
-	compressor         *Compressor            // outbound compression state.
-	decompressor       *Decompressor          // inbound decompression state.
-	nextServerStreamID uint32                 // next inbound stream ID. (even)
-	nextClientStreamID uint32                 // next outbound stream ID. (odd)
-	version            uint8                  // WP version.
-	numBenignErrors    int                    // number of non-serious errors encountered.
-	done               *sync.WaitGroup        // WaitGroup for active streams.
-	pushReceiver       Receiver               // Receiver used to process server pushes.
-	pushRequests       map[uint32]*Request    // map of requests sent in server pushes.
+	dataOutput         chan Frame               // receiving frames from streams to send.
+	pings              map[uint32]chan<- bool   // response channel for pings.
+	pingID             uint32                   // next outbound ping ID.
+	compressor         *Compressor              // outbound compression state.
+	decompressor       *Decompressor            // inbound decompression state.
+	nextServerStreamID uint32                   // next inbound stream ID. (even)
+	nextClientStreamID uint32                   // next outbound stream ID. (odd)
+	version            uint8                    // WP version.
+	numBenignErrors    int                      // number of non-serious errors encountered.
+	done               *sync.WaitGroup          // WaitGroup for active streams.
+	pushReceiver       Receiver                 // Receiver used to process server pushes.
+	pushRequests       map[uint32]*http.Request // map of requests sent in server pushes.
 }
 
 // readFrames is the main processing loop, where frames
@@ -202,17 +202,17 @@ func (conn *clientConnection) Push(resource string, origin Stream) (PushWriter, 
 // data received from the server. The returned Stream can be
 // used to manipulate the underlying stream, provided the
 // request was started successfully.
-func (conn *clientConnection) Request(req *Request, res Receiver) (Stream, error) {
+func (conn *clientConnection) Request(req *http.Request, priority int, res Receiver) (Stream, error) {
 
 	// Prepare the Request.
 	syn := new(RequestFrame)
-	syn.Priority = uint8(req.Priority)
+	syn.Priority = uint8(priority)
 	url := req.URL
 	if url == nil || url.Scheme == "" || url.Host == "" || url.Path == "" {
 		return nil, errors.New("Error: Incomplete path provided to resource.")
 	}
 
-	headers := req.Headers
+	headers := req.Header
 	headers.Set(":path", url.Path)
 	headers.Set(":host", url.Host)
 	headers.Set(":scheme", url.Scheme)
@@ -241,9 +241,7 @@ func (conn *clientConnection) Request(req *Request, res Receiver) (Stream, error
 		}
 
 		// Half-close the stream.
-		if len(body) == 0 {
-			syn.flags = FLAG_FIN
-		} else {
+		if len(body) != 0 {
 			syn.Headers.Set("Content-Length", fmt.Sprint(total))
 		}
 		req.Body.Close()
@@ -269,7 +267,7 @@ func (conn *clientConnection) Request(req *Request, res Receiver) (Stream, error
 	out.output = conn.dataOutput
 	out.request = req
 	out.receiver = res
-	out.headers = make(Headers)
+	out.headers = make(http.Header)
 	out.stop = false
 	out.version = conn.version
 	out.done = make(chan struct{}, 1)
@@ -367,15 +365,14 @@ func (conn *clientConnection) handlePush(frame *PushFrame) {
 		return
 	}
 	method := headers.Get(":method")
-	request := &Request{
+	request := &http.Request{
 		Method:     method,
 		URL:        url,
 		Proto:      vers,
 		ProtoMajor: major,
 		ProtoMinor: minor,
-		Priority:   7,
 		RemoteAddr: conn.remoteAddr,
-		Headers:    headers,
+		Header:     headers,
 		Host:       url.Host,
 		RequestURI: url.Path,
 		TLS:        conn.tlsState,
@@ -609,7 +606,7 @@ func newClientConn(tlsConn *tls.Conn) *clientConnection {
 	conn.compressor = new(Compressor)
 	conn.decompressor = new(Decompressor)
 	conn.done = new(sync.WaitGroup)
-	conn.pushRequests = make(map[uint32]*Request)
+	conn.pushRequests = make(map[uint32]*http.Request)
 
 	return conn
 }
