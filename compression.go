@@ -196,3 +196,7 @@ func (c *Compressor) Compress(h http.Header) ([]byte, error) {
 	c.w.Flush()
 	return c.buf.Bytes(), nil
 }
+
+func (c *Compressor) Close() error {
+	return c.w.Close()
+}

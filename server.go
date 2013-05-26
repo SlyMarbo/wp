@@ -48,6 +48,12 @@ type ResponseWriter interface {
 	// initial 512 bytes of written data to DetectContentType.
 	Write([]byte) (int, error)
 
+	// WriteHeader sends a WP response with the status code provided.
+	// If WriteHeader is not called explicitly, the first call to Write
+	// will Trigger an implicit WriteHeader(http.StatusOK). Thus
+	// explicit calls to WriteHeader are mainly used to send error codes.
+	WriteHeader(int)
+
 	// WriteHeaders is used to send new changes to the Header. This is
 	// called implicitly by WriteResponse and Write, so it's rarely
 	// necessary to call manually.

@@ -124,6 +124,10 @@ func (s *serverStream) Write(inputData []byte) (int, error) {
 	return written + n, nil
 }
 
+func (s *serverStream) WriteHeader(code int) {
+	s.WriteResponse(httpToWpResponseCode(code))
+}
+
 // WriteHeaders is used to flush HTTP headers.
 func (s *serverStream) WriteHeaders() {
 	if len(s.headers) == 0 {

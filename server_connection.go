@@ -137,6 +137,10 @@ func (conn *serverConnection) send() {
 
 		// Select the next frame to send.
 		frame := conn.selectFrameToSend()
+		
+		if frame == nil {
+			return
+		}
 
 		// Compress any name/value header blocks.
 		err := frame.EncodeHeaders(conn.compressor)
@@ -577,6 +581,12 @@ func (conn *serverConnection) cleanup() {
 		stream.Stop()
 	}
 	conn.streams = nil
+	for _, output := range conn.dataPriority {
+		close(output)
+	}
+	conn.compressor.Close()
+	conn.compressor = nil
+	conn.decompressor = nil
 }
 
 // serve prepares and executes the frame reading
