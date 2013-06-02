@@ -338,6 +338,16 @@ func (r *response) ReceiveRequest(req *http.Request) bool {
 	return false
 }
 
+func (r *response) ReceiveResponse(req *http.Request, code, subcode uint8) {
+	if r.Receiver != nil {
+		r.Receiver.ReceiveResponse(req, code, subcode)
+	}
+	if r.Header == nil {
+		r.Header = make(http.Header)
+	}
+	r.Header.Set(":response", fmt.Sprintf("%d/%d", code, subcode))
+}
+
 func (r *response) Response() *http.Response {
 	if r.Data == nil {
 		r.Data = new(bytes.Buffer)

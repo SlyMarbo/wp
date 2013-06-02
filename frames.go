@@ -222,8 +222,8 @@ func (frame *responseFrame) ReadFrom(reader io.Reader) (int64, error) {
 	}
 
 	// Check it's a Response.
-	if data[0] != RESPONSE {
-		return 8, &incorrectFrame{int(data[0]), RESPONSE}
+	if data[2] != RESPONSE {
+		return 8, &incorrectFrame{int(data[2]), RESPONSE}
 	}
 
 	// Check length.

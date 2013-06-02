@@ -71,10 +71,14 @@ type Decompressor interface {
 // The returned bool should inticate whether to accept
 // the push. The provided Request will be that sent by
 // the server with the push.
+//
+// ReceiveResponse is used to indicate the WP status
+// code sent in a Response frame.
 type Receiver interface {
 	ReceiveData(request *http.Request, data []byte, final bool)
 	ReceiveHeader(request *http.Request, header http.Header)
 	ReceiveRequest(request *http.Request) bool
+	ReceiveResponse(request *http.Request, code, subcode uint8)
 }
 
 /********

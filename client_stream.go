@@ -128,13 +128,20 @@ func (s *clientStream) ReceiveFrame(frame Frame) error {
 		}
 
 		// Give to the client.
-		if s.receiver != nil {
-			s.receiver.ReceiveData(s.request, data, frame.Flags.FINISH())
+		s.receiver.ReceiveData(s.request, data, frame.Flags.FINISH())
+
+		if frame.Flags.FINISH() {
+			s.state.CloseThere()
+			close(s.finished)
 		}
 
 	case *responseFrame:
-		if s.receiver != nil {
-			s.receiver.ReceiveHeader(s.request, frame.Header)
+		s.receiver.ReceiveResponse(s.request, frame.ResponseCode, frame.ResponseSubcode)
+		s.receiver.ReceiveHeader(s.request, frame.Header)
+
+		if frame.Flags.FINISH() {
+			s.state.CloseThere()
+			close(s.finished)
 		}
 
 	case *headersFrame:

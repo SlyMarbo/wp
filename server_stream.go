@@ -23,9 +23,10 @@ type serverStream struct {
 	request         *http.Request
 	handler         http.Handler
 	header          http.Header
-	responseCode    int
-	responseSubcode int
+	responseCode    uint8
+	responseSubcode uint8
 	wroteHeader     bool
+	wroteResponse   bool
 	stop            <-chan struct{}
 }
 
@@ -35,7 +36,9 @@ type serverStream struct {
 
 func (s *serverStream) Header() http.Header {
 	return s.header
-} // Write is the main method with which data is sent.
+}
+
+// Write is the main method with which data is sent.
 func (s *serverStream) Write(inputData []byte) (int, error) {
 	if s.closed() || s.state.ClosedHere() {
 		return 0, errors.New("Error: Stream already closed.")
@@ -83,29 +86,7 @@ func (s *serverStream) WriteHeader(code int) {
 		log.Println("Error: Multiple calls to ResponseWriter.WriteHeader.")
 		return
 	}
-
 	s.wroteHeader = true
-	s.responseCode = code
-	s.header.Set("status", strconv.Itoa(code))
-	s.header.Set("version", "HTTP/1.1")
-
-	// Create the Response.
-	response := new(responseFrame)
-	response.StreamID = s.streamID
-	response.Header = cloneHeader(s.header)
-
-	// Clear the headers that have been sent.
-	for name := range response.Header {
-		s.header.Del(name)
-	}
-
-	// These responses have no body, so close the stream now.
-	if code == 204 || code == 304 || code/100 == 1 {
-		response.Flags = FLAG_FINISH
-		s.state.CloseHere()
-	}
-
-	s.output <- response
 
 	s.WriteResponse(httpToWpResponseCode(code))
 }
@@ -197,11 +178,12 @@ func (s *serverStream) Run() error {
 	// already.
 	// If the stream is already closed at
 	// this end, then nothing happens.
-	if s.state.OpenHere() && !s.wroteHeader {
-		s.header.Set("status", "200")
-		s.header.Set("version", "HTTP/1.1")
+	if s.state.OpenHere() && !s.wroteResponse {
+		s.header.Set(":status", "200")
+		s.header.Set(":version", "HTTP/1.1")
 
 		// Create the Response.
+		log.Println("Response")
 		response := new(responseFrame)
 		response.Flags = FLAG_FINISH
 		response.StreamID = s.streamID
@@ -233,19 +215,23 @@ func (s *serverStream) StreamID() StreamID {
 
 // WriteResponse is used to set the WP status code.
 func (s *serverStream) WriteResponse(code, subcode int) {
-	if s.wroteHeader {
-		log.Println("Error: Multiple calls to ResponseWriter.WriteHeader.")
+	if s.wroteResponse {
+		log.Println("Error: Multiple calls to ResponseWriter.WriteResponse.")
 		return
 	}
 
-	s.wroteHeader = true
-	s.responseCode = code
-	s.responseSubcode = subcode
+	s.wroteResponse = true
+	s.responseCode = uint8(code)
+	s.responseSubcode = uint8(subcode)
+	s.header.Set(":status", strconv.Itoa(wpToHttpResponseCode(code, subcode)))
+	s.header.Set(":version", "HTTP/1.1")
 
-	// Create the response SYN_REPLY.
+	// Create the Response.
 	reply := new(responseFrame)
 	reply.StreamID = s.streamID
 	reply.Header = cloneHeader(s.header)
+	reply.ResponseCode = uint8(code)
+	reply.ResponseSubcode = uint8(subcode)
 
 	// Clear the headers that have been sent.
 	for name := range reply.Header {
