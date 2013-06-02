@@ -51,46 +51,9 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	
-	// Register handler.
 	http.HandleFunc("/", ServeHTTP)
 
 	// Use wp's ListenAndServe.
-	err := wp.ListenAndServeTLS("localhost:443", "cert.pem", "key.pem", nil)
-	if err != nil {
-		// handle error.
-	}
-}
-```
-
-WP now supports reuse of HTTP handlers, as demonstrated above. Although this allows you to use just one set of
-handlers, it means there is no way to use the WP-specific capabilities provided by `wp.ResponseWriter`, such as
-server pushes, or to know which protocol is being used.
-
-Making full use of the Web Protocol simple requires adding an extra handler:
-```go
-package main
-
-import (
-	"github.com/SlyMarbo/wp"
-	"net/http"
-)
-
-// This now only serves HTTP/HTTPS requests.
-func ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("Hello, HTTP!"))
-}
-
-// Add a WP handler.
-func ServeWP(w wp.ResponseWriter, r *wp.Request) {
-	w.Write([]byte("Hello, WP!"))
-}
-
-func main() {
-	
-	// Register handlers.
-	http.HandleFunc("/", ServeHTTP)
-	wp.HandleFunc("/", ServeWP)
-
 	err := wp.ListenAndServeTLS("localhost:443", "cert.pem", "key.pem", nil)
 	if err != nil {
 		// handle error.
@@ -107,19 +70,19 @@ import (
 	"net/http"
 )
 
-func ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func Serve(w http.ResponseWriter, r *http.Request) {
+	if wp.UsingWP(w) {
+		// Using WP.
+	} else {
+		// Using HTTP(S).
+	}
 	http.ServeFile(w, r, "." + r.RequestURI)
-}
-
-func ServeWP(w wp.ResponseWriter, r *wp.Request) {
-	wp.ServeFile(w, r, "." + r.RequestURI)
 }
 
 func main() {
 	
-	// Register handlers.
-	http.HandleFunc("/", ServeHTTP)
-	wp.HandleFunc("/", ServeWP)
+	// Register handler.
+	http.HandleFunc("/", Serve)
 
 	err := wp.ListenAndServeTLS("localhost:443", "cert.pem", "key.pem", nil)
 	if err != nil {
@@ -130,7 +93,7 @@ func main() {
 
 The following examples use features specific to WP.
 
-Just the WP handler is shown.
+Just the handler is shown.
 
 Use WP's pinging features to test the connection:
 ```go
@@ -138,16 +101,20 @@ package main
 
 import (
 	"github.com/SlyMarbo/wp"
+	"net/http"
 	"time"
 )
 
-func ServeWP(w wp.ResponseWriter, r *wp.Request) {
-	// Ping returns a channel which will send a bool.
-	ping := w.Ping()
+func Serve(w http.ResponseWriter, r *http.Request) {
+	// Ping returns a channel which will send an empty struct.
+	ping, err := wp.PingClient(w)
+	if err != nil {
+		// Not using WP.
+	}
 	
 	select {
-	case success := <- ping:
-		if success {
+	case response := <- ping:
+		if response != nil {
 			// Connection is fine.
 		} else {
 			// Something went wrong.
@@ -166,32 +133,26 @@ Sending a server push:
 ```go
 package main
 
-import "github.com/SlyMarbo/wp"
+import (
+	"github.com/SlyMarbo/wp"
+	"net/http"
+)
 
-func ServeWP(w wp.ResponseWriter, r *wp.Request) {
-	
-	// Push a whole file automatically.
-	wp.PushFile(w, r, otherFile)
-	
-	// or
-	
-	// Push returns a PushWriter (similar to a ResponseWriter) and an error.
-	push, err := w.Push()
+func Serve(w http.ResponseWriter, r *http.Request) {
+	// Push returns a separate http.ResponseWriter and an error.
+	push, err := wp.Push("/example.js")
 	if err != nil {
-		// Handle the error.
+		// Not using WP.
 	}
-	push.Write([]byte("Some stuff."))   // Push data manually.
+	http.ServeFile(push, r, "./content/example.js")
 	
 	// ...
 }
 ```
 
+
 Clients
 -------
-
-The basic client API seems to work well in general, but gets a redirect loop when requesting https://twitter.com/, so
-I'm not happy with it. Since I can't see Twitter's servers' WP logs, I don't know what's wrong yet, but I'm working
-hard at it.
 
 Here's a simple example that will fetch the requested page over HTTP, HTTPS, or WP, as necessary.
 ```go
@@ -199,12 +160,12 @@ package main
 
 import (
 	"fmt"
-	"github.com/SlyMarbo/wp"
+	"github.com/SlyMarbo/wp" // Simply import WP.
 	"io/ioutil"
 )
 
 func main() {
-	res, err := wp.Get("https://example.com/")
+	res, err := http.Get("https://example.com/") // http.Get (and .Post etc) can now use WP.
 	if err != nil {
 		// handle the error.
 	}

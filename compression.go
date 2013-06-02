@@ -13,7 +13,7 @@ import (
 // Decompressor is used to decompress name/value header blocks.
 // Decompressors retain their state, so a single Decompressor
 // should be used for each direction of a particular connection.
-type Decompressor struct {
+type decompressor struct {
 	m   sync.Mutex
 	in  *bytes.Buffer
 	out io.ReadCloser
@@ -21,7 +21,7 @@ type Decompressor struct {
 
 // Decompress uses zlib decompression to decompress the provided
 // data, according to the SPDY specification of the given version.
-func (d *Decompressor) Decompress(data []byte) (headers http.Header, err error) {
+func (d *decompressor) Decompress(data []byte) (headers http.Header, err error) {
 	d.m.Lock()
 	defer d.m.Unlock()
 
@@ -106,7 +106,7 @@ func (d *Decompressor) Decompress(data []byte) (headers http.Header, err error) 
 // Compressors retain their state, so a single Compressor
 // should be used for each direction of a particular
 // connection.
-type Compressor struct {
+type compressor struct {
 	m   sync.Mutex
 	buf *bytes.Buffer
 	w   *zlib.Writer
@@ -114,7 +114,7 @@ type Compressor struct {
 
 // Compress uses zlib compression to compress the provided
 // data, according to the SPDY/3 specification.
-func (c *Compressor) Compress(h http.Header) ([]byte, error) {
+func (c *compressor) Compress(h http.Header) ([]byte, error) {
 	c.m.Lock()
 	defer c.m.Unlock()
 
@@ -197,6 +197,14 @@ func (c *Compressor) Compress(h http.Header) ([]byte, error) {
 	return c.buf.Bytes(), nil
 }
 
-func (c *Compressor) Close() error {
-	return c.w.Close()
+func (c *compressor) Close() error {
+	if c.w == nil {
+		return nil
+	}
+	err := c.w.Close()
+	if err != nil {
+		return err
+	}
+	c.w = nil
+	return nil
 }

@@ -1,10 +1,8 @@
 package wp
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 )
@@ -13,79 +11,32 @@ import (
 // the Stream and ResponseWriter interfaces. This
 // is used for responding to client requests.
 type clientStream struct {
-	sync.RWMutex
-	conn            *clientConnection
-	content         *bytes.Buffer
-	streamID        uint32
+	sync.Mutex
+	conn            Conn
+	streamID        StreamID
 	state           *StreamState
 	output          chan<- Frame
 	request         *http.Request
 	receiver        Receiver
-	headers         http.Header
+	header          http.Header
 	responseCode    int
 	responseSubcode int
-	stop            bool
-	version         uint8
-	done            chan struct{}
+	stop            <-chan struct{}
+	finished        chan struct{}
 }
 
-func (s *clientStream) Connection() Connection {
-	return s.conn
-}
+/***********************
+ * http.ResponseWriter *
+ ***********************/
 
 func (s *clientStream) Header() http.Header {
-	return s.headers
-}
-
-func (s *clientStream) Ping() <-chan bool {
-	return s.conn.Ping()
-}
-
-func (s *clientStream) Push(string) (PushWriter, error) {
-	panic("Error: Request stream cannot push.")
-}
-
-func (s *clientStream) Read(out []byte) (int, error) {
-	n, err := s.content.Read(out)
-	if err != io.EOF || s.state.ClosedThere() {
-		return n, err
-	}
-	return n, nil
-}
-
-func (s *clientStream) ReceiveFrame(frame Frame) {
-	s.Lock()
-	s.receiveFrame(frame)
-	s.Unlock()
-}
-
-func (s *clientStream) State() *StreamState {
-	return s.state
-}
-
-func (s *clientStream) Stop() {
-	s.stop = true
-	if s.state.OpenHere() {
-		rst := new(ErrorFrame)
-		rst.streamID = s.streamID
-		rst.Status = FINISH_STREAM
-		s.output <- rst
-	}
-	s.done <- struct{}{}
-}
-
-func (s *clientStream) StreamID() uint32 {
-	return s.streamID
+	return s.header
 }
 
 // Write is one method with which request data is sent.
 func (s *clientStream) Write(inputData []byte) (int, error) {
-	if s.state.ClosedHere() {
+	if s.closed() || s.state.ClosedHere() {
 		return 0, errors.New("Error: Stream already closed.")
-	}
-
-	if s.stop {
-		return 0, ErrCancelled
 	}
 
 	// Copy the data locally to avoid any pointer issues.
@@ -93,13 +44,13 @@ func (s *clientStream) Write(inputData []byte) (int, error) {
 	copy(data, inputData)
 
 	// Send any new headers.
-	s.WriteHeaders()
+	s.writeHeader()
 
 	// Chunk the response if necessary.
 	written := 0
 	for len(data) > MAX_DATA_SIZE {
-		dataFrame := new(DataFrame)
-		dataFrame.streamID = s.streamID
+		dataFrame := new(dataFrame)
+		dataFrame.StreamID = s.streamID
 		dataFrame.Data = data[:MAX_DATA_SIZE]
 		s.output <- dataFrame
 
@@ -111,51 +62,64 @@ func (s *clientStream) Write(inputData []byte) (int, error) {
 		return written, nil
 	}
 
-	dataFrame := new(DataFrame)
-	dataFrame.streamID = s.streamID
+	dataFrame := new(dataFrame)
+	dataFrame.StreamID = s.streamID
 	dataFrame.Data = data
 	s.output <- dataFrame
 
 	return written + n, nil
 }
 
-// WriteHeaders is used to flush HTTP headers.
-func (s *clientStream) WriteHeaders() {
-	if len(s.headers) == 0 {
-		return
+// WriteHeader is used to set the HTTP status code.
+func (s *clientStream) WriteHeader(int) {
+	s.writeHeader()
+}
+
+/*****************
+ * io.ReadCloser *
+ *****************/
+
+// Close is used to stop the stream safely.
+func (s *clientStream) Close() error {
+	s.Lock()
+	defer s.Unlock()
+	s.writeHeader()
+	if s.state != nil {
+		s.state.Close()
+		s.state = nil
 	}
-
-	// Create the HEADERS frame.
-	headers := new(HeadersFrame)
-	headers.streamID = s.streamID
-	headers.Headers = cloneHeaders(s.headers)
-
-	// Clear the headers that have been sent.
-	for name := range headers.Headers {
-		s.headers.Del(name)
-	}
-
-	s.output <- headers
+	s.output = nil
+	s.request = nil
+	s.receiver = nil
+	s.header = nil
+	s.stop = nil
+	return nil
 }
 
-// WriteHeader is used to set the WP status code.
-func (s *clientStream) WriteResponse(int, int) {
-	panic("Error: Cannot write status code on request.")
+func (s *clientStream) Read(out []byte) (int, error) {
+	// TODO
+	return 0, nil
 }
 
-func (s *clientStream) Version() uint8 {
-	return s.version
+/**********
+ * Stream *
+ **********/
+
+func (s *clientStream) Conn() Conn {
+	return s.conn
 }
 
-// receiveFrame is used to process an inbound frame.
-func (s *clientStream) receiveFrame(frame Frame) {
+func (s *clientStream) ReceiveFrame(frame Frame) error {
+	s.Lock()
+	defer s.Unlock()
+
 	if frame == nil {
-		panic("Nil frame received in receiveFrame.")
+		return errors.New("Nil frame received in receiveFrame.")
 	}
 
 	// Process the frame depending on its type.
 	switch frame := frame.(type) {
-	case *DataFrame:
+	case *dataFrame:
 
 		// Extract the data.
 		data := frame.Data
@@ -163,52 +127,81 @@ func (s *clientStream) receiveFrame(frame Frame) {
 			data = []byte{}
 		}
 
-		// Check whether this is the last frame.
-		finish := frame.flags&FLAG_FIN != 0
-
 		// Give to the client.
 		if s.receiver != nil {
-			s.receiver.ReceiveData(s.request, data, finish)
-		} else {
-			err := Write(s.content, data)
-			if err != nil {
-				panic(err)
-			}
+			s.receiver.ReceiveData(s.request, data, frame.Flags.FINISH())
 		}
 
-	case *ResponseFrame:
+	case *responseFrame:
 		if s.receiver != nil {
-			s.receiver.ReceiveHeaders(s.request, frame.Headers)
-			s.receiver.ReceiveResponse(s.request, frame.ResponseCode, frame.ResponseSubcode)
+			s.receiver.ReceiveHeader(s.request, frame.Header)
 		}
 
-	case *HeadersFrame:
+	case *headersFrame:
 		if s.receiver != nil {
-			s.receiver.ReceiveHeaders(s.request, frame.Headers)
+			s.receiver.ReceiveHeader(s.request, frame.Header)
 		}
 
 	default:
-		panic(fmt.Sprintf("Received unknown frame of type %T.", frame))
+		return errors.New(fmt.Sprintf("Received unknown frame of type %T.", frame))
 	}
+
+	return nil
 }
 
-// Run is the main control path of
+// run is the main control path of
 // the stream. Data is recieved,
 // processed, and then the stream
 // is cleaned up and closed.
-func (s *clientStream) Run() {
-	s.conn.done.Add(1)
-
+func (s *clientStream) Run() error {
 	// Receive and process inbound frames.
-	s.Wait()
+	<-s.finished
 
 	// Clean up state.
 	s.state.CloseHere()
-	s.conn.done.Done()
+	return nil
 }
 
-// Wait will block until the stream
-// ends.
-func (s *clientStream) Wait() {
-	<-s.done
+func (s *clientStream) State() *StreamState {
+	return s.state
+}
+
+func (s *clientStream) StreamID() StreamID {
+	return s.streamID
+}
+
+// WriteHeader is used to set the WP status code.
+func (s *clientStream) WriteResponse(int, int) {
+	panic("Error: Cannot write status code on request.")
+}
+
+func (s *clientStream) closed() bool {
+	if s.conn == nil || s.state == nil || s.receiver == nil {
+		return true
+	}
+	select {
+	case _ = <-s.stop:
+		return true
+	default:
+		return false
+	}
+}
+
+// WriteHeader is used to flush HTTP headers.
+func (s *clientStream) writeHeader() {
+	if len(s.header) == 0 {
+		return
+	}
+
+	// Create the HEADERS frame.
+	headers := new(headersFrame)
+	headers.StreamID = s.streamID
+	headers.Header = cloneHeader(s.header)
+
+	// Clear the headers that have been sent.
+	for name := range headers.Header {
+		s.header.Del(name)
+	}
+
+	s.output <- headers
 }

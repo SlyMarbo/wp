@@ -2,7 +2,6 @@ package wp
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"io/ioutil"
 	logging "log"
@@ -11,7 +10,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 )
 
 // MaxBenignErrors is the maximum
@@ -22,20 +20,20 @@ var MaxBenignErrors = 10
 
 // Control types.
 const (
-	HEADERS = iota
-	ERROR
-	REQUEST
+	REQUEST = iota
 	RESPONSE
-	PUSH
 	DATA
+	ERROR
+	HEADERS
+	PUSH
 	PING
 )
 
 // Flags
 
 const (
-	FLAG_FIN   = 1
-	FLAG_READY = 2
+	FLAG_FINISH = 1
+	FLAG_READY  = 2
 )
 
 // Data response status types
@@ -75,8 +73,13 @@ const (
 	StatusServiceTimeout     = 2
 )
 
-// Data content header constants
-const ContentMaxFileSize = 0xffffffff
+// State variables used internally in StreamState.
+const (
+	stateOpen uint8 = iota
+	stateHalfClosedHere
+	stateHalfClosedThere
+	stateClosed
+)
 
 // Maximum frame size (2 ** 24 -1).
 const MAX_FRAME_SIZE = 0xffffff
@@ -87,21 +90,47 @@ const MAX_DATA_SIZE = 0xfffff7
 // Maximum stream ID (2 ** 31 -1).
 const MAX_STREAM_ID = 0x7fffffff
 
+// Stream error status codes
+const (
+	PROTOCOL_ERROR    = 0x1
+	INVALID_STREAM    = 0x2
+	REFUSED_STREAM    = 0x3
+	STREAM_CLOSED     = 0x4
+	STREAM_ID_MISSING = 0x5
+	INTERNAL_ERROR    = 0x6
+	FINISH_STREAM     = 0x7
+)
+
+var statusCodeText = map[StatusCode]string{
+	PROTOCOL_ERROR:    "PROTOCOL_ERROR",
+	INVALID_STREAM:    "INVALID_STREAM",
+	REFUSED_STREAM:    "REFUSED_STREAM",
+	STREAM_CLOSED:     "STREAM_CLOSED",
+	STREAM_ID_MISSING: "STREAM_ID_MISSING",
+	INTERNAL_ERROR:    "INTERNAL_ERROR",
+	FINISH_STREAM:     "FINISH_STREAM",
+}
+
+// statusCodeIsFatal returns a bool
+// indicating whether receiving the
+// given status code would end the
+// connection.
+func statusCodeIsFatal(code StatusCode) bool {
+	switch code {
+	case PROTOCOL_ERROR:
+		return true
+	case INTERNAL_ERROR:
+		return true
+
+	default:
+		return false
+	}
+}
+
 const (
 	MAX_PRIORITY = 0
 	MIN_PRIORITY = 7
 )
-
-// readCloserBuffer is a helper structure
-// to allow a bytes buffer to satisfy the
-// io.ReadCloser interface.
-type readCloserBuffer struct {
-	io.Reader
-}
-
-func (r *readCloserBuffer) Close() error {
-	return nil
-}
 
 // Version factors.
 var supportedVersions = map[uint8]struct{}{
@@ -122,15 +151,19 @@ func SupportedVersions() []int {
 	return s
 }
 
-// NpnStrings returns the NPN version strings for the WP versions
+var npnStrings = map[uint16]string{
+	2: "wp/2",
+}
+
+// npn returns the NPN version strings for the WP versions
 // currently enabled, plus HTTP/1.1.
-//
-//		fmt.Println(spdy.NpnStrings()) // => ["wp/2" "http/1.1"]
-func NpnStrings() []string {
+func npn() []string {
 	v := SupportedVersions()
 	s := make([]string, 0, len(v)+1)
 	for _, v := range v {
-		s = append(s, fmt.Sprintf("wp/%d", v))
+		if str := npnStrings[uint16(v)]; str != "" {
+			s = append(s, str)
+		}
 	}
 	s = append(s, "http/1.1")
 	return s
@@ -177,130 +210,13 @@ func DisableWpVersion(v uint8) error {
 	return nil
 }
 
-// State variables used internally in StreamState.
-const (
-	STATE_OPEN uint8 = iota
-	STATE_HALF_CLOSED_HERE
-	STATE_HALF_CLOSED_THERE
-	STATE_CLOSED
-)
-
-// StreamState is used to store and query
-// the stream's state. The active methods
-// do not directly affect the stream's
-// state, but it will use that information
-// to affect the changes.
-type StreamState struct {
-	sync.RWMutex
-	s uint8
-}
-
-// Check whether the stream is open.
-func (s *StreamState) Open() bool {
-	s.RLock()
-	defer s.RUnlock()
-	return s.s == STATE_OPEN
-}
-
-// Check whether the stream is closed.
-func (s *StreamState) Closed() bool {
-	s.RLock()
-	defer s.RUnlock()
-	return s.s == STATE_CLOSED
-}
-
-// Check whether the stream is half-closed at the other endpoint.
-func (s *StreamState) ClosedThere() bool {
-	s.RLock()
-	defer s.RUnlock()
-	return s.s == STATE_CLOSED || s.s == STATE_HALF_CLOSED_THERE
-}
-
-// Check whether the stream is open at the other endpoint.
-func (s *StreamState) OpenThere() bool {
-	return !s.ClosedThere()
-}
-
-// Check whether the stream is half-closed at the other endpoint.
-func (s *StreamState) ClosedHere() bool {
-	s.RLock()
-	defer s.RUnlock()
-	return s.s == STATE_CLOSED || s.s == STATE_HALF_CLOSED_HERE
-}
-
-// Check whether the stream is open locally.
-func (s *StreamState) OpenHere() bool {
-	return !s.ClosedHere()
-}
-
-// Closes the stream.
-func (s *StreamState) Close() {
-	s.Lock()
-	s.s = STATE_CLOSED
-	s.Unlock()
-}
-
-// Half-close the stream locally.
-func (s *StreamState) CloseHere() {
-	s.Lock()
-	if s.s == STATE_OPEN {
-		s.s = STATE_HALF_CLOSED_HERE
-	} else if s.s == STATE_HALF_CLOSED_THERE {
-		s.s = STATE_CLOSED
-	}
-	s.Unlock()
-}
-
-// Half-close the stream at the other endpoint.
-func (s *StreamState) CloseThere() {
-	s.Lock()
-	if s.s == STATE_OPEN {
-		s.s = STATE_HALF_CLOSED_THERE
-	} else if s.s == STATE_HALF_CLOSED_HERE {
-		s.s = STATE_CLOSED
-	}
-	s.Unlock()
-}
-
-func Read(r io.Reader, i int) ([]byte, error) {
-	out := make([]byte, i)
-	in := out[:]
-	for i > 0 {
-		if n, err := r.Read(in); err != nil {
-			return nil, err
-		} else {
-			in = in[n:]
-			i -= n
-		}
-	}
-	return out, nil
-}
-
-func Write(w io.Writer, data []byte) error {
-	i := len(data)
-	for i > 0 {
-		if n, err := w.Write(data); err != nil {
-			return err
-		} else {
-			data = data[n:]
-			i -= n
-		}
-	}
-	return nil
-}
-
 // DefaultPriority returns the default request
 // priority for the given target path. This is
 // currently in accordance with Google Chrome;
 // giving 0 for pages, 1 for CSS, 2 for JS, 3
 // for images. Other types default to 2.
-func DefaultPriority(path string) int {
-	u, err := url.Parse(path)
-	if err != nil {
-		log.Printf("Failed to parse request path %q. Using priority 4.\n", path)
-		return 4
-	}
-	path = strings.ToLower(u.Path)
+func DefaultPriority(request *url.URL) Priority {
+	path := strings.ToLower(request.Path)
 	switch {
 	case strings.HasSuffix(path, "/"), strings.HasSuffix(path, ".html"), strings.HasSuffix(path, ".xhtml"):
 		return 0
@@ -319,129 +235,6 @@ func DefaultPriority(path string) int {
 
 	default:
 		return 2
-	}
-}
-
-func bytesToUint16(b []byte) uint16 {
-	return (uint16(b[0]) << 8) + uint16(b[1])
-}
-
-func bytesToUint24(b []byte) uint32 {
-	return (uint32(b[0]) << 16) + (uint32(b[1]) << 8) + uint32(b[2])
-}
-
-func bytesToUint32(b []byte) uint32 {
-	return (uint32(b[0]) << 24) + (uint32(b[1]) << 16) + (uint32(b[2]) << 8) + uint32(b[3])
-}
-
-func bytesToUint31(b []byte) uint32 {
-	return (uint32(b[0]&0x7f) << 24) + (uint32(b[1]) << 16) + (uint32(b[2]) << 8) + uint32(b[3])
-}
-
-type IncorrectFrame struct {
-	got, expected int
-}
-
-func (i *IncorrectFrame) Error() string {
-	return fmt.Sprintf("Error: Frame %s tried to parse data for a %s.", FrameName(i.expected), FrameName(i.got))
-}
-
-type IncorrectDataLength struct {
-	got, expected int
-}
-
-func (i *IncorrectDataLength) Error() string {
-	return fmt.Sprintf("Error: Incorrect amount of data for frame: got %d bytes, expected %d.", i.got, i.expected)
-}
-
-var FrameTooLarge = errors.New("Error: Frame too large.")
-
-type InvalidField struct {
-	field         string
-	got, expected int
-}
-
-func (i *InvalidField) Error() string {
-	return fmt.Sprintf("Error: Field %q recieved invalid data %d, expecting %d.", i.field, i.got, i.expected)
-}
-
-// ErrMissingFile is returned by FormFile when the provided file field name
-// is either not present in the request or not a file field.
-var ErrMissingFile = errors.New("spdy: no such file")
-
-// HTTP request parsing errors.
-type ProtocolError struct {
-	ErrorString string
-}
-
-func (err *ProtocolError) Error() string { return err.ErrorString }
-
-var (
-	ErrHeaderTooLong        = &ProtocolError{"header too long"}
-	ErrShortBody            = &ProtocolError{"entity body too short"}
-	ErrNotSupported         = &ProtocolError{"feature not supported"}
-	ErrUnexpectedTrailer    = &ProtocolError{"trailer header without chunked transfer encoding"}
-	ErrMissingContentLength = &ProtocolError{"missing ContentLength in HEAD response"}
-	ErrNotMultipart         = &ProtocolError{"request Content-Type isn't multipart/form-data"}
-	ErrMissingBoundary      = &ProtocolError{"no multipart boundary param in Content-Type"}
-)
-
-var frameNames = map[int]string{
-	HEADERS:  "HEADERS",
-	ERROR:    "ERROR",
-	REQUEST:  "REQUEST",
-	RESPONSE: "RESPONSE",
-	PUSH:     "PUSH",
-	DATA:     "DATA",
-	PING:     "PING",
-}
-
-func FrameName(frameType int) string {
-	return frameNames[frameType]
-}
-
-// Stream error status codes
-const (
-	PROTOCOL_ERROR    = 0x1
-	INVALID_STREAM    = 0x2
-	REFUSED_STREAM    = 0x3
-	STREAM_CLOSED     = 0x4
-	STREAM_ID_MISSING = 0x5
-	INTERNAL_ERROR    = 0x6
-	FINISH_STREAM     = 0x7
-)
-
-var statusCodeText = map[int]string{
-	PROTOCOL_ERROR:    "PROTOCOL_ERROR",
-	INVALID_STREAM:    "INVALID_STREAM",
-	REFUSED_STREAM:    "REFUSED_STREAM",
-	STREAM_CLOSED:     "STREAM_CLOSED",
-	STREAM_ID_MISSING: "STREAM_ID_MISSING",
-	INTERNAL_ERROR:    "INTERNAL_ERROR",
-	FINISH_STREAM:     "FINISH_STREAM",
-}
-
-// StatusCodeText returns the text for
-// the STREAM_ERROR status code given.
-// The empty string will be returned
-// for unknown status codes.
-func StatusCodeText(code int) string {
-	return statusCodeText[code]
-}
-
-// StatusCodeIsFatal returns a bool
-// indicating whether receiving the
-// given status code would end the
-// connection.
-func StatusCodeIsFatal(code int) bool {
-	switch code {
-	case PROTOCOL_ERROR:
-		return true
-	case INTERNAL_ERROR:
-		return true
-
-	default:
-		return false
 	}
 }
 
@@ -476,33 +269,11 @@ func EnableDebugOutput() {
 // Errors introduced by the HTTP server.
 var (
 	ErrWriteAfterFlush = errors.New("Conn.Write called after Flush")
-	ErrBodyNotAllowed  = errors.New("spdy: request method or response status code does not allow body")
+	ErrBodyNotAllowed  = errors.New("request method or response status code does not allow body")
 	ErrHijacked        = errors.New("Conn has been hijacked")
 	ErrContentLength   = errors.New("Conn.Write wrote more than the declared Content-Length")
-	ErrCancelled       = errors.New("spdy: Stream has been cancelled.")
+	ErrCancelled       = errors.New("Stream has been cancelled.")
 )
-
-// _httpResponseWriter is just a wrapper used
-// to allow a spdy.ResponseWriter to fulfil
-// the http.ResponseWriter interface.
-type httpResponseWriter struct {
-	ResponseWriter
-}
-
-func (h *httpResponseWriter) WriteHeader(code int) {
-	h.WriteResponse(httpToWpResponseCode(code))
-}
-
-// _httpResponseWriter is just a wrapper used
-// to allow a spdy.PushWriter to fulfil the
-// http.ResponseWriter interface.
-type httpPushWriter struct {
-	PushWriter
-}
-
-func (h *httpPushWriter) WriteHeader(int) {
-	h.WriteHeaders()
-}
 
 var statusTexts = [][]string{
 	[]string{

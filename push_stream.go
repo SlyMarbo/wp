@@ -2,6 +2,8 @@ package wp
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"sync"
 )
@@ -10,83 +12,27 @@ import (
 // Stream and PushWriter interfaces. this is used
 // for performing server pushes.
 type pushStream struct {
-	sync.RWMutex
-	conn        *serverConnection
-	streamID    uint32
-	origin      Stream
-	state       *StreamState
-	output      chan<- Frame
-	headers     http.Header
-	headersSent bool
-	stop        bool
-	cancelled   bool
-	version     uint8
+	sync.Mutex
+	conn     Conn
+	streamID StreamID
+	origin   Stream
+	state    *StreamState
+	output   chan<- Frame
+	header   http.Header
+	stop     <-chan struct{}
 }
 
-func (p *pushStream) Cancel() {
-	p.Lock()
-	p.cancelled = true
-	rst := new(ErrorFrame)
-	rst.streamID = p.streamID
-	rst.Status = FINISH_STREAM
-	p.output <- rst
-	p.Unlock()
-}
-
-func (p *pushStream) Connection() Connection {
-	return p.conn
-}
-
-// Close is used to complete a server push. This
-// closes the underlying stream and signals to
-// the recipient that the push is complete. The
-// equivalent action in a ResponseWriter is to
-// return from the handler. Any calls to Write
-// after calling Close will have no effect.
-func (p *pushStream) Close() {
-	p.stop = true
-
-	stop := new(DataFrame)
-	stop.streamID = p.streamID
-	stop.flags = FLAG_FIN
-	stop.Data = []byte{}
-
-	p.output <- stop
-
-	p.state.CloseHere()
-}
+/***********************
+ * http.ResponseWriter *
+ ***********************/
 
 func (p *pushStream) Header() http.Header {
-	return p.headers
-}
-
-func (p *pushStream) Read([]byte) (int, error) {
-	panic("Error: Push cannot receive frames.")
-}
-
-func (p *pushStream) ReceiveFrame(Frame) {
-	panic("Error: Push cannot receive frames.")
-}
-
-func (p *pushStream) State() *StreamState {
-	return p.state
-}
-
-func (p *pushStream) Stop() {
-	p.stop = true
-}
-
-func (p *pushStream) StreamID() uint32 {
-	return p.streamID
+	return p.header
 }
 
 // Write is used for sending data in the push.
 func (p *pushStream) Write(inputData []byte) (int, error) {
-	if p.cancelled {
-		return 0, errors.New("Error: Push has been cancelled.")
-	}
-
-	if p.state.ClosedHere() {
+	if p.closed() || p.state.ClosedHere() {
 		return 0, errors.New("Error: Stream already closed.")
 	}
 
@@ -95,11 +41,7 @@ func (p *pushStream) Write(inputData []byte) (int, error) {
 		return 0, errors.New("Error: Origin stream is closed.")
 	}
 
-	if p.stop {
-		return 0, ErrCancelled
-	}
-
-	p.WriteHeaders()
+	p.writeHeader()
 
 	// Copy the data locally to avoid any pointer issues.
 	data := make([]byte, len(inputData))
@@ -108,8 +50,8 @@ func (p *pushStream) Write(inputData []byte) (int, error) {
 	// Chunk the response if necessary.
 	written := 0
 	for len(data) > MAX_DATA_SIZE {
-		dataFrame := new(DataFrame)
-		dataFrame.streamID = p.streamID
+		dataFrame := new(dataFrame)
+		dataFrame.StreamID = p.streamID
 		dataFrame.Data = data[:MAX_DATA_SIZE]
 		p.output <- dataFrame
 
@@ -121,46 +63,108 @@ func (p *pushStream) Write(inputData []byte) (int, error) {
 		return written, nil
 	}
 
-	dataFrame := new(DataFrame)
-	dataFrame.streamID = p.streamID
+	dataFrame := new(dataFrame)
+	dataFrame.StreamID = p.streamID
 	dataFrame.Data = data
 	p.output <- dataFrame
 
 	return written + n, nil
 }
 
-// WriteHeaders is used to send HTTP headers to
-// the client.
-func (p *pushStream) WriteHeaders() {
-	if len(p.headers) == 0 {
-		return
+// WriteHeader is provided to satisfy the Stream
+// interface, but has no effect.
+// TODO: add handling for certain status codes like 304.
+func (p *pushStream) WriteHeader(int) {
+	p.writeHeader()
+	return
+}
+
+/*****************
+ * io.ReadCloser *
+ *****************/
+
+func (p *pushStream) Close() error {
+	p.Lock()
+	defer p.Unlock()
+	p.writeHeader()
+	if p.state != nil {
+		p.state.Close()
+		p.state = nil
+	}
+	p.origin = nil
+	p.output = nil
+	p.header = nil
+	p.stop = nil
+	return nil
+}
+
+func (p *pushStream) Read(out []byte) (int, error) {
+	return 0, io.EOF
+}
+
+/**********
+ * Stream *
+ **********/
+
+func (p *pushStream) Conn() Conn {
+	return p.conn
+}
+
+func (p *pushStream) ReceiveFrame(frame Frame) error {
+	p.Lock()
+	defer p.Unlock()
+
+	if frame == nil {
+		return errors.New("Error: Nil frame received.")
 	}
 
-	headers := new(HeadersFrame)
-	headers.streamID = p.streamID
-	headers.Headers = cloneHeaders(p.headers)
-	for name := range headers.Headers {
-		p.headers.Del(name)
-	}
-	p.output <- headers
+	return errors.New(fmt.Sprintf("Received unexpected frame of type %T.", frame))
+}
+
+func (p *pushStream) Run() error {
+	return nil
+}
+
+func (p *pushStream) State() *StreamState {
+	return p.state
+}
+
+func (p *pushStream) StreamID() StreamID {
+	return p.streamID
 }
 
 // WriteResponse is provided to satisfy the Stream
 // interface, but has no effect.
 func (p *pushStream) WriteResponse(int, int) {
 	log.Println("Warning: PushWriter.WriteHeader has no effect.")
-	p.WriteHeaders()
+	p.writeHeader()
 	return
 }
 
-func (p *pushStream) Version() uint8 {
-	return p.version
+func (p *pushStream) closed() bool {
+	if p.conn == nil || p.state == nil {
+		return true
+	}
+	select {
+	case _ = <-p.stop:
+		return true
+	default:
+		return false
+	}
 }
 
-func (p *pushStream) Run() {
-	panic("Error: Push cannot run.")
-}
+// writeHeader is used to send HTTP headers to
+// the client.
+func (p *pushStream) writeHeader() {
+	if len(p.header) == 0 {
+		return
+	}
 
-func (s *pushStream) Wait() {
-	panic("Error: Push cannot run.")
+	header := new(headersFrame)
+	header.StreamID = p.streamID
+	header.Header = cloneHeader(p.header)
+	for name := range header.Header {
+		p.header.Del(name)
+	}
+	p.output <- header
 }
